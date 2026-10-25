@@ -12,7 +12,6 @@ member-callout-exercise/
 ├── DESIGN.md                     # Specifications & architecture design documents
 ├── django-member-callout/        # Backend application (Django / Python)
 │   ├── manage.py
-│   ├── db.sqlite3
 │   ├── .venv/
 │   └── member_callout_exercise/  # Django project configuration & settings
 │       ├── settings.py
@@ -39,7 +38,6 @@ The backend service powering the API and business logic using Django (Python):
   * **`settings.py`**: Global application settings, installed apps, middleware, database connection, and security configurations.
   * **`urls.py`**: Root URL routing and API route declarations.
   * **`wsgi.py` / `asgi.py`**: Web server gateway interfaces for deployment.
-* **`db.sqlite3`**: SQLite database file used for local development.
 * **`.venv/`**: Python virtual environment containing installed packages.
 
 ---
