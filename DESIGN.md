@@ -133,3 +133,7 @@ Each protection is enforced in the database and API state machine:
 ### Precautions for Production
 * **Rule 2 Alert:** Alert if pushes sent ever exceed the number of recipients.
 * **Rule 1 Alert:** A test account in one local tries to read another local’s callout every few minutes and alerts on any success, and a nightly check looks for rows where the locals don’t match.
+
+### 4. A diagram
+
+https://excalidraw.com/#json=7s7_jjpXnhNHY8bbtLWJU,mKW6jbi5ZnI-xyrAmndCHQ
