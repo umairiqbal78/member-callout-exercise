@@ -197,6 +197,7 @@ class ReceiptBatchSerializer(serializers.Serializer):
     )
     delivered = serializers.BooleanField(default=True)
     read = serializers.BooleanField(default=False)
+    acknowledged = serializers.BooleanField(default=False, required=False)
 
 
 class RespondSerializer(serializers.Serializer):

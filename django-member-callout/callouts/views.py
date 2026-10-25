@@ -377,6 +377,9 @@ class InboxView(LocalScopedMixin, generics.ListAPIView):
         return qs
 
 
+from .services import record_receipts, record_response
+
+
 class ReceiptBatchView(LocalScopedMixin, APIView):
     """
     POST /api/me/receipts/
@@ -384,7 +387,8 @@ class ReceiptBatchView(LocalScopedMixin, APIView):
     Body: {"announcement_ids": [...], "delivered": true, "read": false}
 
     Sets delivered_at and/or read_at with COALESCE semantics (set only once,
-    a repeated event can't undo). Members can only touch their own rows.
+    a repeated event can't undo). Fills earlier funnel steps automatically.
+    Members can only touch their own rows.
     """
 
     permission_classes = [IsMember]
@@ -395,30 +399,13 @@ class ReceiptBatchView(LocalScopedMixin, APIView):
         data = serializer.validated_data
         member = request.user.member
 
-        now = timezone.now()
-        update_kwargs = {}
-        if data["delivered"]:
-            # COALESCE: sets delivered_at only if it is currently NULL.
-            update_kwargs["delivered_at"] = Coalesce(
-                "delivered_at",
-                Value(now, output_field=DateTimeField()),
-            )
-        if data["read"]:
-            update_kwargs["read_at"] = Coalesce(
-                "read_at",
-                Value(now, output_field=DateTimeField()),
-            )
-
-        if not update_kwargs:
-            return Response({"updated": 0})
-
-        # Scope to: this member's rows + correct local + only targeted announcements.
-        updated = (
-            AnnouncementRecipient.objects.filter(
-                member_id=member.pk,
-                local_id=member.local_id,
-                announcement_id__in=data["announcement_ids"],
-            ).update(**update_kwargs)
+        updated = record_receipts(
+            member_id=member.pk,
+            local_id=member.local_id,
+            announcement_ids=data["announcement_ids"],
+            delivered=data.get("delivered", True),
+            read=data.get("read", False),
+            acknowledged=data.get("acknowledged", False),
         )
         return Response({"updated": updated})
 
@@ -460,20 +447,9 @@ class RespondView(LocalScopedMixin, APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        now = timezone.now()
-        AnnouncementRecipient.objects.filter(pk=recipient.pk).update(
-            response=response_value,
-            responded_at=now,
-            # COALESCE: only set if not already set
-            read_at=_coalesce_now("read_at", now),
-            acknowledged_at=_coalesce_now("acknowledged_at", now),
+        record_response(
+            recipient=recipient,
+            response_value=response_value,
         )
         return Response({"detail": "Response recorded."})
 
-
-# ── Utilities ─────────────────────────────────────────────────────────────────
-
-
-def _coalesce_now(field_name, now):
-    """COALESCE(field, now) — sets the field only if it is currently NULL."""
-    return Coalesce(field_name, Value(now, output_field=DateTimeField()))

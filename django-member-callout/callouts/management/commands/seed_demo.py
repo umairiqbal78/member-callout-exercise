@@ -14,9 +14,10 @@ Design decisions:
   Realistic mix of delivery / read / response / push_error states.
 """
 
+import hashlib
 import random
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_tz
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -30,6 +31,7 @@ from callouts.models import (
     LeadershipRole,
     Local,
     Member,
+    PushLog,
 )
 
 User = get_user_model()
@@ -156,6 +158,7 @@ class Command(BaseCommand):
         with transaction.atomic():
             # Delete in FK-safe order.
             ann_ids = [ANNOUNCEMENT_27_ID, ANNOUNCEMENT_27_DRAFT_ID, ANNOUNCEMENT_104_DRAFT_ID]
+            PushLog.objects.filter(announcement_id__in=ann_ids).delete()
             AnnouncementRecipient.objects.filter(
                 announcement_id__in=ann_ids
             ).delete()
@@ -289,6 +292,7 @@ class Command(BaseCommand):
         )
 
     def _seed_announcement(self, local: Local, created_by: Member) -> Announcement:
+        base_sent_at = datetime(2026, 10, 25, 10, 0, 0, tzinfo=dt_tz.utc)
         announcement, _ = Announcement.objects.get_or_create(
             id=ANNOUNCEMENT_27_ID,
             defaults={
@@ -301,12 +305,12 @@ class Command(BaseCommand):
                     "Your attendance is critical."
                 ),
                 "needs_ack": True,
-                "starts_at": timezone.now() + timedelta(days=3),
+                "starts_at": datetime(2026, 10, 28, 18, 0, 0, tzinfo=dt_tz.utc),
                 "status": Announcement.Status.SENT,
                 "source": Announcement.Source.MANUAL,
                 "audience_classifications": CLASSIFICATIONS,
                 "push_preview": "Emergency meeting — Q4 contract talks. Please attend.",
-                "sent_at": timezone.now() - timedelta(hours=2),
+                "sent_at": base_sent_at,
                 "idempotency_key": "emergency-meeting-q4-2026",
             },
         )
@@ -360,8 +364,8 @@ class Command(BaseCommand):
         rng,
     ):
         """
-        Bulk-create recipient rows for every active member.
-        Uses ON CONFLICT DO NOTHING so a second run is harmless.
+        Bulk-create recipient rows and push_log rows for every active member
+        with deterministic scores and realistic funnel progression.
         """
         existing_member_ids = set(
             AnnouncementRecipient.objects.filter(
@@ -369,57 +373,86 @@ class Command(BaseCommand):
             ).values_list("member_id", flat=True)
         )
 
-        now = timezone.now()
+        sent_at = announcement.sent_at or datetime(2026, 10, 25, 10, 0, 0, tzinfo=dt_tz.utc)
         to_create = []
+        push_logs_to_create = []
+
+        existing_push_members = set(
+            PushLog.objects.filter(announcement_id=announcement.id).values_list("member_id", flat=True)
+        )
+
         for member_id in member_ids:
+            digest1 = hashlib.md5(f"{announcement.id}:{member_id}".encode()).hexdigest()
+            digest2 = hashlib.md5(f"{announcement.id}:{member_id}:resp".encode()).hexdigest()
+
+            # Funnel scores
+            score = int(digest1[:8], 16) / 0xFFFFFFFF
+            resp_score = int(digest2[:8], 16) / 0xFFFFFFFF
+
+            # Offsets spread over a few hours after sent_at:
+            # delivered: 60s to ~2 hours after sent_at
+            del_offset = int(digest1[8:12], 16) % 7200 + 60
+            # read: 30s to 1 hour after delivery
+            read_offset = del_offset + (int(digest1[12:16], 16) % 3600 + 30)
+            # ack: 15s to 30 min after read
+            ack_offset = read_offset + (int(digest2[8:12], 16) % 1800 + 15)
+            # resp: 15s to 30 min after ack
+            resp_offset = ack_offset + (int(digest2[12:16], 16) % 1800 + 15)
+
+            # Simulated push outcome
+            push_val = int(digest1[-4:], 16)
+            push_sent_at = sent_at + timedelta(seconds=push_val % 300)
+            if push_val < 2621:  # ~4% error
+                push_error = "FCM: SIMULATED_ERROR"
+                push_outcome = PushLog.Outcome.ERROR
+            elif push_val < 4587:  # ~3% silent_drop
+                push_error = ""
+                push_outcome = PushLog.Outcome.SILENT_DROP
+            else:
+                push_error = ""
+                push_outcome = PushLog.Outcome.SENT
+
+            if member_id not in existing_push_members:
+                push_logs_to_create.append(
+                    PushLog(
+                        announcement=announcement,
+                        member_id=member_id,
+                        sent_at=push_sent_at,
+                        simulated_outcome=push_outcome,
+                    )
+                )
+
             if member_id in existing_member_ids:
                 continue
-            # Assign a realistic state based on rng.
-            roll = rng.random()
+
+            # Funnel rule progression:
+            # Delivered if score < 0.90, read if < 0.65, acknowledged if < 0.45, responded if < 0.32
+            # Second hash splits responded into ~70% coming and 30% cant_make_it
             delivered_at = None
             read_at = None
             acknowledged_at = None
             response = None
             responded_at = None
-            push_error = ""
 
-            if roll < 0.05:
-                # ~5%: push failed, nothing received yet
-                push_error = "FCM: UNREGISTERED"
-            elif roll < 0.15:
-                # ~10%: targeted but nothing received
-                pass
-            elif roll < 0.45:
-                # ~30%: delivered only
-                delivered_at = now - timedelta(hours=rng.randint(1, 120))
-            elif roll < 0.60:
-                # ~15%: delivered + read
-                delivered_at = now - timedelta(hours=rng.randint(1, 120))
-                read_at = delivered_at + timedelta(minutes=rng.randint(1, 30))
-            elif roll < 0.72:
-                # ~12%: delivered + read + acknowledged
-                delivered_at = now - timedelta(hours=rng.randint(1, 120))
-                read_at = delivered_at + timedelta(minutes=rng.randint(1, 30))
-                acknowledged_at = read_at + timedelta(minutes=rng.randint(1, 20))
-            elif roll < 0.84:
-                # ~12%: coming
-                delivered_at = now - timedelta(hours=rng.randint(1, 48))
-                read_at = delivered_at + timedelta(minutes=rng.randint(1, 30))
-                acknowledged_at = read_at + timedelta(minutes=rng.randint(1, 20))
-                response = AnnouncementRecipient.Response.COMING
-                responded_at = acknowledged_at + timedelta(minutes=rng.randint(1, 10))
-            else:
-                # ~16%: can't make it
-                delivered_at = now - timedelta(hours=rng.randint(1, 48))
-                read_at = delivered_at + timedelta(minutes=rng.randint(1, 30))
-                response = AnnouncementRecipient.Response.CANT_MAKE_IT
-                responded_at = read_at + timedelta(minutes=rng.randint(1, 10))
-
-            push_sent_at = (
-                None
-                if push_error
-                else (now - timedelta(hours=rng.randint(1, 120)) if rng.random() > 0.1 else None)
-            )
+            if score < 0.32:
+                delivered_at = sent_at + timedelta(seconds=del_offset)
+                read_at = sent_at + timedelta(seconds=read_offset)
+                acknowledged_at = sent_at + timedelta(seconds=ack_offset)
+                responded_at = sent_at + timedelta(seconds=resp_offset)
+                response = (
+                    AnnouncementRecipient.Response.COMING
+                    if resp_score < 0.70
+                    else AnnouncementRecipient.Response.CANT_MAKE_IT
+                )
+            elif score < 0.45:
+                delivered_at = sent_at + timedelta(seconds=del_offset)
+                read_at = sent_at + timedelta(seconds=read_offset)
+                acknowledged_at = sent_at + timedelta(seconds=ack_offset)
+            elif score < 0.65:
+                delivered_at = sent_at + timedelta(seconds=del_offset)
+                read_at = sent_at + timedelta(seconds=read_offset)
+            elif score < 0.90:
+                delivered_at = sent_at + timedelta(seconds=del_offset)
 
             to_create.append(
                 AnnouncementRecipient(
@@ -440,6 +473,10 @@ class Command(BaseCommand):
         for i in range(0, len(to_create), chunk_size):
             AnnouncementRecipient.objects.bulk_create(
                 to_create[i : i + chunk_size], ignore_conflicts=True
+            )
+        for i in range(0, len(push_logs_to_create), chunk_size):
+            PushLog.objects.bulk_create(
+                push_logs_to_create[i : i + chunk_size], ignore_conflicts=True
             )
 
         # Update recipient_count on the announcement.

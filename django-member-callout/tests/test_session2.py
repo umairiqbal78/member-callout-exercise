@@ -21,12 +21,15 @@ Tests:
 import collections
 import concurrent.futures
 from datetime import timedelta
+import io
+import json
 import time
 from unittest import mock
 import uuid
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -54,6 +57,7 @@ from callouts.tasks import (
     _compute_stats_from_db,
     closer,
     fan_out_task,
+    invariant_check,
     push_task,
     sweeper,
 )
@@ -575,3 +579,218 @@ def test_scale_22400_members():
     print(f"  Push tasks duration:  {t_push:.3f} seconds")
     print(f"  Stats computation:    {t_stats * 1000:.2f} ms (1 query)")
     print(f"{'='*60}\n")
+
+
+# ── Follow-up Tests: Funnel Rule, Simulate Activity & Invariants ───────────────
+
+
+@pytest.mark.django_db(transaction=True)
+def test_funnel_invariants_hold_after_seed():
+    """
+    After seeding, invariant_check must return OK, and all recipients of the
+    seeded sent announcement must satisfy the Funnel Rule.
+    """
+    result = invariant_check()
+    assert result == "OK", f"Expected OK, got violations: {result}"
+
+    # Verify directly on seeded ANNOUNCEMENT_27_ID rows
+    recipients = AnnouncementRecipient.objects.filter(announcement_id=ANNOUNCEMENT_27_ID)
+    assert recipients.exists()
+
+    for r in recipients:
+        if r.read_at is not None:
+            assert r.delivered_at is not None
+            assert r.delivered_at <= r.read_at
+        if r.acknowledged_at is not None:
+            assert r.read_at is not None
+            assert r.read_at <= r.acknowledged_at
+        if r.response is not None:
+            assert r.acknowledged_at is not None
+            assert r.responded_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_simulate_activity_funnel_and_stats_ground_truth():
+    """
+    simulate_activity drives realistic funnel progression and outputs ground truth.
+    The stats endpoint and _compute_stats_from_db must equal ground truth exactly,
+    and all funnel metrics must be non-zero and properly nested.
+    """
+    local27 = Local.objects.get(id=LOCAL_27_ID)
+    leader27 = Member.objects.get(user__username="leader_local27")
+
+    ann = Announcement.objects.create(
+        local=local27,
+        created_by=leader27,
+        title="Simulate Activity Test",
+        body="Body",
+        status=Announcement.Status.SENT,
+        sent_at=timezone.now(),
+    )
+
+    # Create 100 recipients
+    members = list(Member.objects.filter(local_id=LOCAL_27_ID, status=Member.Status.ACTIVE)[:100])
+    AnnouncementRecipient.objects.bulk_create([
+        AnnouncementRecipient(
+            announcement_id=ann.id,
+            member_id=m.id,
+            local_id=LOCAL_27_ID,
+            push_sent_at=timezone.now(),
+        )
+        for m in members
+    ])
+    ann.recipient_count = len(members)
+    ann.save(update_fields=["recipient_count"])
+
+    out = io.StringIO()
+    call_command("simulate_activity", str(ann.id), stdout=out)
+    output_line = out.getvalue().strip()
+    ground_truth = json.loads(output_line)
+
+    assert ground_truth["targeted"] == 100
+    assert ground_truth["delivered"] > 0
+    assert ground_truth["read"] > 0
+    assert ground_truth["acknowledged"] > 0
+    assert ground_truth["coming"] > 0
+    assert ground_truth["cant_make_it"] > 0
+
+    # Nesting
+    assert ground_truth["targeted"] >= ground_truth["delivered"]
+    assert ground_truth["delivered"] >= ground_truth["read"]
+    assert ground_truth["read"] >= ground_truth["acknowledged"]
+    assert ground_truth["acknowledged"] >= (ground_truth["coming"] + ground_truth["cant_make_it"])
+    assert ground_truth["no_response"] == (ground_truth["targeted"] - ground_truth["coming"] - ground_truth["cant_make_it"])
+
+    # Computed stats match ground truth
+    db_stats = _compute_stats_from_db(ann.id)
+    for k, v in ground_truth.items():
+        assert db_stats[k] == v, f"Stats mismatch on {k}: {db_stats[k]} != {v}"
+
+    # Invariants hold
+    assert invariant_check() == "OK"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_simulate_activity_idempotency_and_preserves_response():
+    """
+    simulate_activity is idempotent: running it a 2nd time produces identical counts.
+    It never overwrites a recipient who already responded.
+    """
+    local27 = Local.objects.get(id=LOCAL_27_ID)
+    leader27 = Member.objects.get(user__username="leader_local27")
+
+    ann = Announcement.objects.create(
+        local=local27,
+        created_by=leader27,
+        title="Simulate Activity Idempotency Test",
+        body="Body",
+        status=Announcement.Status.SENT,
+        sent_at=timezone.now(),
+    )
+
+    members = list(Member.objects.filter(local_id=LOCAL_27_ID, status=Member.Status.ACTIVE)[:50])
+    recipients = [
+        AnnouncementRecipient(
+            announcement_id=ann.id,
+            member_id=m.id,
+            local_id=LOCAL_27_ID,
+            push_sent_at=timezone.now(),
+        )
+        for m in members
+    ]
+    # Explicitly set response on member 0
+    now0 = timezone.now()
+    recipients[0].delivered_at = now0
+    recipients[0].read_at = now0
+    recipients[0].acknowledged_at = now0
+    recipients[0].responded_at = now0
+    recipients[0].response = AnnouncementRecipient.Response.COMING
+
+    AnnouncementRecipient.objects.bulk_create(recipients)
+    ann.recipient_count = len(members)
+    ann.save(update_fields=["recipient_count"])
+
+    # First run
+    out1 = io.StringIO()
+    call_command("simulate_activity", str(ann.id), stdout=out1)
+    gt1 = json.loads(out1.getvalue().strip())
+
+    # Check recipient 0 was preserved
+    r0 = AnnouncementRecipient.objects.get(announcement_id=ann.id, member_id=members[0].id)
+    assert r0.response == AnnouncementRecipient.Response.COMING
+
+    # Second run
+    out2 = io.StringIO()
+    call_command("simulate_activity", str(ann.id), stdout=out2)
+    gt2 = json.loads(out2.getvalue().strip())
+
+    assert gt1 == gt2, f"Idempotency violated: {gt1} != {gt2}"
+    assert invariant_check() == "OK"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_invariant_check_detects_deliberate_duplicate_push_log():
+    """
+    The invariant check detects a deliberately inserted duplicate push_log row.
+    """
+    ann = Announcement.objects.filter(status=Announcement.Status.SENT).first()
+    member = Member.objects.filter(local_id=ann.local_id).first()
+
+    # Clean state
+    assert invariant_check() == "OK"
+
+    # Insert two push_log rows for the same (announcement_id, member_id)
+    now = timezone.now()
+    p1 = PushLog.objects.create(announcement=ann, member=member, sent_at=now, simulated_outcome=PushLog.Outcome.SENT)
+    p2 = PushLog.objects.create(announcement=ann, member=member, sent_at=now, simulated_outcome=PushLog.Outcome.SENT)
+
+    result = invariant_check()
+    assert result != "OK"
+    assert any("push_log duplicate" in err for err in result)
+
+    # Clean up
+    p1.delete()
+    p2.delete()
+    assert invariant_check() == "OK"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_invariant_check_detects_deliberate_broken_funnel_row():
+    """
+    The invariant check detects a deliberately broken funnel row:
+    e.g., read_at set without delivered_at.
+    """
+    assert invariant_check() == "OK"
+
+    local27 = Local.objects.get(id=LOCAL_27_ID)
+    leader27 = Member.objects.get(user__username="leader_local27")
+    member27 = Member.objects.get(user__username="member_local27")
+
+    test_ann = Announcement.objects.create(
+        local=local27,
+        created_by=leader27,
+        title="Broken Funnel Test Announcement",
+        body="Body",
+        status=Announcement.Status.SENT,
+        sent_at=timezone.now(),
+    )
+
+    # Insert a recipient row violating the funnel: read_at set but delivered_at is NULL
+    broken_rec = AnnouncementRecipient.objects.create(
+        announcement=test_ann,
+        member=member27,
+        local=local27,
+        delivered_at=None,
+        read_at=timezone.now(),
+    )
+
+    result = invariant_check()
+    assert result != "OK"
+    assert any("funnel violation" in err for err in result)
+
+    # Clean up
+    broken_rec.delete()
+    test_ann.delete()
+    assert invariant_check() == "OK"
+
+

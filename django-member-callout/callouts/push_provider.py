@@ -30,15 +30,14 @@ def _outcome(announcement_id, member_id):
         return PushLog.Outcome.ERROR
     elif val < 4587:    # ~3% silent_drop
         return PushLog.Outcome.SILENT_DROP
-    return PushLog.Outcome.OK
+    return PushLog.Outcome.SENT
 
 
 def send_push_batch(announcement_id, member_ids):
     """
     Simulate sending push notifications to a batch of member_ids.
 
-    Returns the number of push_log rows actually inserted (ignores conflicts
-    so a rerun inserts zero).
+    The log is append-only and records duplicates honestly for invariant checks.
     """
     if not member_ids:
         return 0
@@ -60,8 +59,8 @@ def send_push_batch(announcement_id, member_ids):
         if outcome == PushLog.Outcome.ERROR:
             error_member_ids.append(mid)
 
-    # ON CONFLICT DO NOTHING — a rerun inserts zero rows.
-    created = PushLog.objects.bulk_create(logs_to_create, ignore_conflicts=True)
+    # Append-only log without conflict ignoring — records dispatches honestly
+    created = PushLog.objects.bulk_create(logs_to_create)
 
     # Set push_error on recipient rows for "error" outcomes.
     if error_member_ids:

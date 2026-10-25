@@ -271,16 +271,17 @@ class PushLog(models.Model):
     """
     Development stand-in for FCM delivery records.
 
-    One row per (announcement_id, member_id) — enforced by a unique constraint.
+    Append-only log recording push notification dispatches. A plain index on
+    (announcement, member) is used without a uniqueness constraint so that
+    duplicate pushes (if any occurred) are recorded honestly for invariant detection.
     The simulated_outcome column records what happened:
-      - ok: push sent successfully
+      - sent: push sent successfully
       - error: push failed (push_error is also set on the recipient row)
       - silent_drop: push sent but silently dropped (simulates FCM silent failure)
-
-    This table is what proves Rule 2: no member is pushed twice.
     """
 
     class Outcome(models.TextChoices):
+        SENT = "sent", "Sent"
         OK = "ok", "OK"
         ERROR = "error", "Error"
         SILENT_DROP = "silent_drop", "Silent drop"
@@ -298,15 +299,16 @@ class PushLog(models.Model):
     )
     sent_at = models.DateTimeField()
     simulated_outcome = models.CharField(
-        max_length=20, choices=Outcome.choices, default=Outcome.OK
+        max_length=20, choices=Outcome.choices, default=Outcome.SENT
     )
 
     class Meta:
         db_table = "push_log"
-        constraints = [
-            models.UniqueConstraint(
+        indexes = [
+            models.Index(
                 fields=["announcement_id", "member_id"],
-                name="push_log_announcement_member_uniq",
-            )
+                name="push_log_ann_member_idx",
+            ),
         ]
+
 

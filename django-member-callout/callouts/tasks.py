@@ -318,6 +318,60 @@ def invariant_check():
                 f"member.local_id={row[2]}, announcement.local_id={row[3]}"
             )
 
+    # 4. recipient funnel violations (row-level)
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT id, announcement_id, member_id,
+                   delivered_at, read_at, acknowledged_at, response, responded_at
+              FROM announcement_recipients
+             WHERE (read_at IS NOT NULL AND delivered_at IS NULL)
+                OR (acknowledged_at IS NOT NULL AND read_at IS NULL)
+                OR (response IS NOT NULL AND (acknowledged_at IS NULL OR responded_at IS NULL))
+                OR (delivered_at IS NOT NULL AND read_at IS NOT NULL AND delivered_at > read_at)
+                OR (read_at IS NOT NULL AND acknowledged_at IS NOT NULL AND read_at > acknowledged_at)
+             LIMIT 10
+        """)
+        for row in cursor.fetchall():
+            errors.append(
+                f"funnel violation on recipient {row[0]} (announcement {row[1]}, member {row[2]}): "
+                f"delivered_at={row[3]}, read_at={row[4]}, acknowledged_at={row[5]}, "
+                f"response={row[6]}, responded_at={row[7]}"
+            )
+
+    # 5. stats nesting violations (announcement-level)
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT
+                announcement_id,
+                COUNT(*) AS targeted,
+                COUNT(*) FILTER (WHERE delivered_at IS NOT NULL) AS delivered,
+                COUNT(*) FILTER (WHERE read_at IS NOT NULL) AS "read",
+                COUNT(*) FILTER (WHERE acknowledged_at IS NOT NULL) AS acknowledged,
+                COUNT(*) FILTER (WHERE response = 'coming') AS coming,
+                COUNT(*) FILTER (WHERE response = 'cant_make_it') AS cant_make_it,
+                COUNT(*) FILTER (WHERE response IS NULL) AS no_response
+              FROM announcement_recipients
+             GROUP BY announcement_id
+            HAVING NOT (
+                COUNT(*) >= COUNT(*) FILTER (WHERE delivered_at IS NOT NULL)
+                AND COUNT(*) FILTER (WHERE delivered_at IS NOT NULL) >= COUNT(*) FILTER (WHERE read_at IS NOT NULL)
+                AND COUNT(*) FILTER (WHERE read_at IS NOT NULL) >= COUNT(*) FILTER (WHERE acknowledged_at IS NOT NULL)
+                AND COUNT(*) FILTER (WHERE acknowledged_at IS NOT NULL) >= (
+                    COUNT(*) FILTER (WHERE response = 'coming') + COUNT(*) FILTER (WHERE response = 'cant_make_it')
+                )
+                AND COUNT(*) FILTER (WHERE response IS NULL) = (
+                    COUNT(*) - COUNT(*) FILTER (WHERE response = 'coming') - COUNT(*) FILTER (WHERE response = 'cant_make_it')
+                )
+            )
+             LIMIT 10
+        """)
+        for row in cursor.fetchall():
+            errors.append(
+                f"stats nesting violation for announcement {row[0]}: "
+                f"targeted={row[1]}, delivered={row[2]}, read={row[3]}, "
+                f"acknowledged={row[4]}, coming={row[5]}, cant_make_it={row[6]}, no_response={row[7]}"
+            )
+
     if errors:
         for e in errors:
             logger.error("INVARIANT VIOLATION: %s", e)

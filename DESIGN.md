@@ -130,6 +130,12 @@ Each protection is enforced in the database and API state machine:
 * **Restart while creating rows:** One row per member per callout is enforced by a unique constraint on `(announcement_id, member_id)` with `ON CONFLICT DO NOTHING`.
 * **Restart while pushing:** A worker marks a member as pushed before sending (`push_sent_at`), so a rerun skips them. In the rare crash, someone misses one nudge but still has the callout in the app.
 
+### Dev Stand-ins & Funnel Rule
+
+* **Dev Stand-ins:** `push_log` is a development stand-in for FCM, kept append-only with a plain index and no uniqueness constraint so duplicate pushes would show up honestly in tests and invariant checks. It is not part of the production data model, where provider-side delivery metrics serve that role.
+* **Funnel Rule:** Recipient states strictly advance in order: `read_at` implies `delivered_at`; `acknowledged_at` implies `read_at`; `response` implies `acknowledged_at` and `responded_at`; and `delivered_at <= read_at <= acknowledged_at`. Earlier steps are automatically backfilled via `COALESCE` in shared service functions.
+* **Stats Nesting:** Aggregated metrics must strictly satisfy: `targeted >= delivered >= read >= acknowledged >= coming + cant_make_it`, and `no_response = targeted - coming - cant_make_it`.
+
 ### Precautions for Production
 * **Rule 2 Alert:** Alert if pushes sent ever exceed the number of recipients.
 * **Rule 1 Alert:** A test account in one local tries to read another local’s callout every few minutes and alerts on any success, and a nightly check looks for rows where the locals don’t match.
