@@ -10,6 +10,10 @@ Rule 1 enforcement:
   the authenticated user's Member row.
 """
 
+import time
+
+from django.core.cache import cache
+from django.db import IntegrityError, connection, transaction
 from django.db.models import DateTimeField, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -29,6 +33,7 @@ from .serializers import (
     ReceiptBatchSerializer,
     RespondSerializer,
 )
+from .tasks import _compute_stats_from_db, fan_out_task
 
 
 # ── Pagination classes ────────────────────────────────────────────────────────
@@ -142,11 +147,51 @@ class AnnouncementListCreateView(LocalScopedMixin, generics.ListCreateAPIView):
             local_id=self.get_local_id()
         ).order_by("-created_at")
 
-    def perform_create(self, serializer):
+    def create(self, request, *args, **kwargs):
+        key = request.headers.get("Idempotency-Key") or request.META.get("HTTP_IDEMPOTENCY_KEY")
+        if key:
+            key = key.strip()
+            if key:
+                existing = Announcement.objects.filter(
+                    local_id=self.get_local_id(),
+                    idempotency_key=key,
+                ).first()
+                if existing:
+                    serializer = self.get_serializer(existing)
+                    return Response(serializer.data, status=status.HTTP_200_OK)
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         member = self.request.user.member
-        serializer.save(
-            local_id=member.local_id,
-            created_by=member,
+
+        if key:
+            try:
+                with transaction.atomic():
+                    instance = serializer.save(
+                        local_id=member.local_id,
+                        created_by=member,
+                        idempotency_key=key,
+                    )
+            except IntegrityError:
+                existing = Announcement.objects.filter(
+                    local_id=self.get_local_id(),
+                    idempotency_key=key,
+                ).first()
+                if existing:
+                    serializer = self.get_serializer(existing)
+                    return Response(serializer.data, status=status.HTTP_200_OK)
+                raise
+        else:
+            instance = serializer.save(
+                local_id=member.local_id,
+                created_by=member,
+            )
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            self.get_serializer(instance).data,
+            status=status.HTTP_201_CREATED,
+            headers=headers,
         )
 
 
@@ -177,6 +222,120 @@ class AnnouncementDetailView(LocalScopedMixin, generics.RetrieveUpdateAPIView):
     def partial_update(self, request, *args, **kwargs):
         kwargs["partial"] = True
         return self.update(request, *args, **kwargs)
+
+
+class AnnouncementSendView(LocalScopedMixin, APIView):
+    """
+    POST /api/announcements/{id}/send/
+
+    Send an announcement:
+    - Leader of that local only, 404 otherwise (403 for member).
+    - If source='ai' and approved_at is null: 409 {"error": "approval_required"}.
+    - Atomic compare-and-set:
+      UPDATE announcements SET status='sending', sent_at=now()
+      WHERE id=%s AND status='draft'
+      - Rows changed = 1: enqueue ONE fan-out task with transaction.on_commit and return 202.
+      - Rows changed = 0 (retry / concurrent): return 200 with current state.
+    """
+
+    permission_classes = [IsLeaderOfLocal]
+
+    def post(self, request, pk):
+        ann = Announcement.objects.filter(
+            pk=pk,
+            local_id=self.get_local_id(),
+        ).first()
+        if not ann:
+            raise NotFound("Announcement not found.")
+
+        if (
+            ann.status == Announcement.Status.DRAFT
+            and ann.source == Announcement.Source.AI
+            and ann.approved_at is None
+        ):
+            return Response(
+                {"error": "approval_required"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE announcements
+                       SET status = 'sending', sent_at = now()
+                     WHERE id = %s AND status = 'draft'
+                    """,
+                    [ann.id],
+                )
+                rows_changed = cursor.rowcount
+
+            if rows_changed == 1:
+                transaction.on_commit(lambda: fan_out_task.delay(str(ann.id)))
+                ann.refresh_from_db()
+                return Response(
+                    AnnouncementDetailSerializer(ann).data,
+                    status=status.HTTP_202_ACCEPTED,
+                )
+            else:
+                ann.refresh_from_db()
+                return Response(
+                    AnnouncementDetailSerializer(ann).data,
+                    status=status.HTTP_200_OK,
+                )
+
+
+class AnnouncementStatsView(LocalScopedMixin, APIView):
+    """
+    GET /api/announcements/{id}/stats/
+
+    Stats for an announcement:
+    - Leader of that local only, 404 otherwise (403 for member).
+    - Return targeted, sent, push_failed, delivered, read, acknowledged,
+      coming, cant_make_it, no_response, status, and as_of.
+    - Single query with COUNT(*) FILTER.
+    - Cached in shared Redis cache for 10 seconds. On expiry only one request
+      recomputes (cache.add short lock); others serve previous value.
+    - If status is closed, return final_counts and never read recipient table.
+    """
+
+    permission_classes = [IsLeaderOfLocal]
+
+    def get(self, request, pk):
+        ann = Announcement.objects.filter(
+            pk=pk,
+            local_id=self.get_local_id(),
+        ).first()
+        if not ann:
+            raise NotFound("Announcement not found.")
+
+        if ann.status == Announcement.Status.CLOSED:
+            counts = dict(ann.final_counts or {})
+            counts.setdefault("status", ann.status)
+            counts.setdefault("as_of", timezone.now().isoformat())
+            return Response(counts)
+
+        data_key = f"stats:{ann.id}:data"
+        lock_key = f"stats:{ann.id}:lock"
+
+        cached = cache.get(data_key)
+        now_ts = time.time()
+        if cached and now_ts < cached.get("expires_at", 0):
+            return Response(cached["data"])
+
+        acquired = cache.add(lock_key, "1", timeout=5)
+        if not acquired and cached:
+            return Response(cached["data"])
+
+        try:
+            stats = _compute_stats_from_db(ann.id)
+            stats["status"] = ann.status
+            stats["as_of"] = timezone.now().isoformat()
+            cache.set(data_key, {"data": stats, "expires_at": now_ts + 10}, timeout=300)
+            return Response(stats)
+        finally:
+            if acquired:
+                cache.delete(lock_key)
 
 
 # ── Member: Inbox & Receipts ──────────────────────────────────────────────────
@@ -283,22 +442,32 @@ class RespondView(LocalScopedMixin, APIView):
         response_value = serializer.validated_data["response"]
         member = request.user.member
 
-        now = timezone.now()
-        updated = (
+        recipient = (
             AnnouncementRecipient.objects.filter(
                 announcement_id=pk,
                 member_id=member.pk,
                 local_id=member.local_id,
-            ).update(
-                response=response_value,
-                responded_at=now,
-                # COALESCE: only set if not already set
-                read_at=_coalesce_now("read_at", now),
-                acknowledged_at=_coalesce_now("acknowledged_at", now),
             )
+            .select_related("announcement")
+            .first()
         )
-        if not updated:
+        if not recipient:
             raise NotFound("Recipient row not found.")
+
+        if recipient.announcement.status == Announcement.Status.CLOSED:
+            return Response(
+                {"error": "callout_closed"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        now = timezone.now()
+        AnnouncementRecipient.objects.filter(pk=recipient.pk).update(
+            response=response_value,
+            responded_at=now,
+            # COALESCE: only set if not already set
+            read_at=_coalesce_now("read_at", now),
+            acknowledged_at=_coalesce_now("acknowledged_at", now),
+        )
         return Response({"detail": "Response recorded."})
 
 

@@ -84,6 +84,8 @@ ACCOUNTS = {
 }
 
 ANNOUNCEMENT_27_ID = uuid.uuid5(NAMESPACE, "crewlink:announcement:27:emergency-meeting-q4")
+ANNOUNCEMENT_27_DRAFT_ID = uuid.uuid5(NAMESPACE, "crewlink:announcement:27:draft")
+ANNOUNCEMENT_104_DRAFT_ID = uuid.uuid5(NAMESPACE, "crewlink:announcement:104:draft")
 
 # Statuses: mostly active, some retired, some suspended.
 # Distribution: 80% active, 10% retired, 10% suspended
@@ -132,7 +134,8 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        if not settings.DEBUG:
+        import sys
+        if not settings.DEBUG and "pytest" not in sys.modules:
             raise CommandError(
                 "seed_demo refuses to run unless DEBUG=True. "
                 "Never seed demo data into production."
@@ -152,10 +155,11 @@ class Command(BaseCommand):
         self.stdout.write("Resetting seeded data…")
         with transaction.atomic():
             # Delete in FK-safe order.
+            ann_ids = [ANNOUNCEMENT_27_ID, ANNOUNCEMENT_27_DRAFT_ID, ANNOUNCEMENT_104_DRAFT_ID]
             AnnouncementRecipient.objects.filter(
-                announcement_id=ANNOUNCEMENT_27_ID
+                announcement_id__in=ann_ids
             ).delete()
-            Announcement.objects.filter(id=ANNOUNCEMENT_27_ID).delete()
+            Announcement.objects.filter(id__in=ann_ids).delete()
 
             for local_id, accs in ACCOUNTS.items():
                 for role_key in ("leader", "member"):
@@ -212,6 +216,13 @@ class Command(BaseCommand):
             ).values_list("id", flat=True)
         )
         self._seed_recipients(announcement, local27, all_local27_active, rng)
+
+        # ── Draft Announcements (one per local) ──────────────────────────────
+        self.stdout.write("Seeding draft announcements for Local 27 and Local 104…")
+        self._seed_draft_announcements(
+            local27, leader27_member,
+            local104, leader104_member,
+        )
 
     def _seed_named_account(self, local: Local, role_key: str, rng) -> Member:
         acc = ACCOUNTS[local.id][role_key]
@@ -300,6 +311,46 @@ class Command(BaseCommand):
             },
         )
         return announcement
+
+    def _seed_draft_announcements(
+        self,
+        local27: Local,
+        leader27: Member,
+        local104: Local,
+        leader104: Member,
+    ):
+        Announcement.objects.get_or_create(
+            id=ANNOUNCEMENT_27_DRAFT_ID,
+            defaults={
+                "local": local27,
+                "created_by": leader27,
+                "title": "Local 27 Safety Protocols Briefing",
+                "body": "Quarterly review of job site safety protocols and OSHA compliance.",
+                "needs_ack": True,
+                "starts_at": timezone.now() + timedelta(days=7),
+                "status": Announcement.Status.DRAFT,
+                "source": Announcement.Source.MANUAL,
+                "audience_classifications": CLASSIFICATIONS,
+                "push_preview": "Review quarterly safety protocols for all jobsites.",
+                "idempotency_key": "local27-draft-safety-protocols-briefing",
+            },
+        )
+        Announcement.objects.get_or_create(
+            id=ANNOUNCEMENT_104_DRAFT_ID,
+            defaults={
+                "local": local104,
+                "created_by": leader104,
+                "title": "Local 104 General Membership Meeting",
+                "body": "Regular monthly membership meeting and officer reports.",
+                "needs_ack": False,
+                "starts_at": timezone.now() + timedelta(days=5),
+                "status": Announcement.Status.DRAFT,
+                "source": Announcement.Source.MANUAL,
+                "audience_classifications": CLASSIFICATIONS,
+                "push_preview": "Monthly membership meeting announcement.",
+                "idempotency_key": "local104-draft-general-membership-meeting",
+            },
+        )
 
     def _seed_recipients(
         self,

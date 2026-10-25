@@ -265,3 +265,48 @@ class AnnouncementRecipient(models.Model):
 
     def __str__(self) -> str:
         return f"Recipient {self.member_id} for announcement {self.announcement_id}"
+
+
+class PushLog(models.Model):
+    """
+    Development stand-in for FCM delivery records.
+
+    One row per (announcement_id, member_id) — enforced by a unique constraint.
+    The simulated_outcome column records what happened:
+      - ok: push sent successfully
+      - error: push failed (push_error is also set on the recipient row)
+      - silent_drop: push sent but silently dropped (simulates FCM silent failure)
+
+    This table is what proves Rule 2: no member is pushed twice.
+    """
+
+    class Outcome(models.TextChoices):
+        OK = "ok", "OK"
+        ERROR = "error", "Error"
+        SILENT_DROP = "silent_drop", "Silent drop"
+
+    id = models.BigAutoField(primary_key=True)
+    announcement = models.ForeignKey(
+        Announcement,
+        on_delete=models.CASCADE,
+        related_name="push_logs",
+    )
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name="push_logs",
+    )
+    sent_at = models.DateTimeField()
+    simulated_outcome = models.CharField(
+        max_length=20, choices=Outcome.choices, default=Outcome.OK
+    )
+
+    class Meta:
+        db_table = "push_log"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["announcement_id", "member_id"],
+                name="push_log_announcement_member_uniq",
+            )
+        ]
+

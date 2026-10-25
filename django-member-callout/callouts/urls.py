@@ -3,6 +3,8 @@ from django.urls import path
 from .views import (
     AnnouncementDetailView,
     AnnouncementListCreateView,
+    AnnouncementSendView,
+    AnnouncementStatsView,
     InboxView,
     LoginView,
     MeView,
@@ -30,5 +32,15 @@ urlpatterns = [
         "announcements/<uuid:pk>/",
         AnnouncementDetailView.as_view(),
         name="announcement-detail",
+    ),
+    path(
+        "announcements/<uuid:pk>/send/",
+        AnnouncementSendView.as_view(),
+        name="announcement-send",
+    ),
+    path(
+        "announcements/<uuid:pk>/stats/",
+        AnnouncementStatsView.as_view(),
+        name="announcement-stats",
     ),
 ]

@@ -106,7 +106,24 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
     }
   ],
   "announcement_local27_id": "81c7d323-2c24-5fea-93d1-faffc3a9e9b8",
+  "announcement_local27_draft_id": "ada55d9c-8630-5bdd-a449-99ff3f838a47",
+  "announcement_local104_draft_id": "fc7f133c-02d1-5a72-8f4d-940f9f714190",
   "member_local104_id": "e4c9f755-5e08-58e4-b214-a1dacb7118ef",
+  "create_example_with_idempotency": {
+    "method": "POST",
+    "path": "/api/announcements/",
+    "headers": {
+      "Authorization": "Token <token>",
+      "Idempotency-Key": "d8b37e0e-94d3-4f93-bc42-6e2eb27ef871",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "title": "Safety Meeting Announcement",
+      "body": "Mandatory safety meeting this Friday.",
+      "needs_ack": true,
+      "source": "manual"
+    }
+  },
   "endpoints": [
     {
       "method": "POST",
@@ -131,8 +148,9 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "method": "POST",
       "path": "/api/announcements/",
       "auth": "Authorization: Token <token>",
+      "headers": "Idempotency-Key: <unique-key> (optional)",
       "roles": "leader only",
-      "notes": "Creates a draft announcement scoped to the caller's local"
+      "notes": "Creates a draft announcement scoped to caller's local. Retries with same key return 200 with the existing announcement."
     },
     {
       "method": "GET",
@@ -145,6 +163,20 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "path": "/api/announcements/{id}/",
       "auth": "Authorization: Token <token>",
       "roles": "leader only — only while status=draft; text edits clear approved_at"
+    },
+    {
+      "method": "POST",
+      "path": "/api/announcements/{id}/send/",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader of that local only — 404 if wrong local, 403 for member",
+      "notes": "Compare-and-set draft -> sending. Enqueues one fan-out task. 202 on first send, 200 on retry."
+    },
+    {
+      "method": "GET",
+      "path": "/api/announcements/{id}/stats/",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader of that local only — 404 if wrong local, 403 for member",
+      "notes": "Single query stats cached in shared Redis for 10s. If closed, returns final_counts without hitting DB."
     },
     {
       "method": "GET",
@@ -165,8 +197,32 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "path": "/api/me/announcements/{id}/respond/",
       "auth": "Authorization: Token <token>",
       "roles": "any authenticated member — only touches own row",
-      "notes": "Body: {response: 'coming' | 'cant_make_it'}"
+      "notes": "Body: {response: 'coming' | 'cant_make_it'}. Returns 409 if announcement is closed."
     }
   ]
 }
 ```
+
+---
+
+## CONCURRENCY HAMMER SCRIPT
+
+A concurrency hammer script is available at `scripts/hammer_send.py`.
+
+### How to run:
+1. Ensure the backend services are running (`docker compose up` or local server + celery worker).
+2. Run the script:
+```bash
+python scripts/hammer_send.py
+```
+Or with custom BASE_URL:
+```bash
+BASE_URL=http://localhost:8000 python scripts/hammer_send.py
+```
+
+The script:
+- Logs in as the Local 27 leader.
+- Creates a draft with a unique `Idempotency-Key`.
+- Fires 20 parallel Send requests (verifying exactly 1 returns 202, 19 return 200).
+- Fires 20 parallel Create requests with the same key (verifying all return 200 with the same ID).
+- Verifies recipient count, distinct push_log members, and executes `python manage.py check_invariants`.

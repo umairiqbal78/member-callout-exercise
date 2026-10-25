@@ -108,3 +108,32 @@ CACHES = {
         "LOCATION": REDIS_URL,
     }
 }
+
+# ── Celery ────────────────────────────────────────────────────────────────────
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+
+CELERY_BEAT_SCHEDULE = {
+    "sweeper": {
+        "task": "callouts.tasks.sweeper",
+        "schedule": 60.0,
+    },
+    "closer": {
+        "task": "callouts.tasks.closer",
+        "schedule": 60.0,
+    },
+    "retention_cleanup": {
+        "task": "callouts.tasks.retention_cleanup",
+        "schedule": 86400.0,  # daily
+    },
+    "invariant_check_beat": {
+        "task": "callouts.tasks.invariant_check",
+        "schedule": 300.0,  # every 5 minutes
+    },
+}
+
+# Retention: delete closed-announcement recipient/push_log data after N days.
+RETENTION_DAYS = config("RETENTION_DAYS", default=365, cast=int)
