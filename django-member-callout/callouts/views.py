@@ -21,9 +21,17 @@ from rest_framework import generics, status
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.pagination import CursorPagination
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from .models import Announcement, AnnouncementRecipient, Member
+from .ai import (
+    AIConfigError,
+    AIInvalidOutputError,
+    AIUnavailableError,
+    deterministic_fact_check,
+    draft_callout,
+)
+from .models import Announcement, AnnouncementRecipient, LeadershipRole, Member
 from .permissions import IsLeaderOfLocal, IsMember
 from .serializers import (
     AnnouncementDetailSerializer,
@@ -230,12 +238,13 @@ class AnnouncementSendView(LocalScopedMixin, APIView):
 
     Send an announcement:
     - Leader of that local only, 404 otherwise (403 for member).
-    - If source='ai' and approved_at is null: 409 {"error": "approval_required"}.
-    - Atomic compare-and-set:
+    - In one atomic compare-and-set query:
       UPDATE announcements SET status='sending', sent_at=now()
-      WHERE id=%s AND status='draft'
-      - Rows changed = 1: enqueue ONE fan-out task with transaction.on_commit and return 202.
-      - Rows changed = 0 (retry / concurrent): return 200 with current state.
+       WHERE id=%s AND status='draft' AND (source <> 'ai' OR approved_at IS NOT NULL)
+    - No separate earlier check so there is no gap between check and update.
+    - If rows changed == 1: enqueue fan-out and return 202.
+    - If rows changed == 0: check if unapproved AI draft -> 409 {"error": "approval_required"};
+      otherwise return 200 with current state.
     """
 
     permission_classes = [IsLeaderOfLocal]
@@ -248,23 +257,15 @@ class AnnouncementSendView(LocalScopedMixin, APIView):
         if not ann:
             raise NotFound("Announcement not found.")
 
-        if (
-            ann.status == Announcement.Status.DRAFT
-            and ann.source == Announcement.Source.AI
-            and ann.approved_at is None
-        ):
-            return Response(
-                {"error": "approval_required"},
-                status=status.HTTP_409_CONFLICT,
-            )
-
         with transaction.atomic():
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     UPDATE announcements
                        SET status = 'sending', sent_at = now()
-                     WHERE id = %s AND status = 'draft'
+                     WHERE id = %s
+                       AND status = 'draft'
+                       AND (source <> 'ai' OR approved_at IS NOT NULL)
                     """,
                     [ann.id],
                 )
@@ -279,10 +280,206 @@ class AnnouncementSendView(LocalScopedMixin, APIView):
                 )
             else:
                 ann.refresh_from_db()
+                if (
+                    ann.status == Announcement.Status.DRAFT
+                    and ann.source == Announcement.Source.AI
+                    and ann.approved_at is None
+                ):
+                    return Response(
+                        {"error": "approval_required"},
+                        status=status.HTTP_409_CONFLICT,
+                    )
                 return Response(
                     AnnouncementDetailSerializer(ann).data,
                     status=status.HTTP_200_OK,
                 )
+
+
+class AnnouncementApproveView(LocalScopedMixin, APIView):
+    """
+    POST /api/announcements/{id}/approve/
+
+    Approval gate for an announcement:
+    - Leader of that local only, 404 otherwise (403 for member).
+    - One UPDATE setting approved_by and approved_at WHERE id=%s AND status='draft' AND approved_at IS NULL.
+    """
+
+    permission_classes = [IsLeaderOfLocal]
+
+    def post(self, request, pk):
+        ann = Announcement.objects.filter(
+            pk=pk,
+            local_id=self.get_local_id(),
+        ).first()
+        if not ann:
+            raise NotFound("Announcement not found.")
+
+        member = request.user.member
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE announcements
+                   SET approved_by_id = %s, approved_at = now()
+                 WHERE id = %s
+                   AND local_id = %s
+                   AND status = 'draft'
+                   AND approved_at IS NULL
+                """,
+                [member.id, ann.id, self.get_local_id()],
+            )
+        ann.refresh_from_db()
+        return Response(
+            AnnouncementDetailSerializer(ann).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class AnnouncementAIDraftView(APIView):
+    """
+    POST /api/announcements/ai-draft/
+
+    AI draft generation:
+    - Leader of that local only (validates local_id against leadership_roles, 404 on mismatch).
+    - ScopedRateThrottle: AI_THROTTLE (10/min).
+    - Idempotency-Key support: same key twice returns same draft without calling provider.
+    - Note length limit: 2,000 characters.
+    - Returns {announcement, warnings}.
+    """
+
+    permission_classes = [IsLeaderOfLocal]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "ai_draft"
+
+    def post(self, request):
+        local_id = request.data.get("local_id")
+        if not local_id:
+            return Response(
+                {"error": "local_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Rule 1: Validate caller's leadership of this specific local
+        is_leader = LeadershipRole.objects.filter(
+            member__user=request.user,
+            local_id=local_id,
+            revoked_at__isnull=True,
+        ).exists()
+        if not is_leader:
+            raise NotFound("Local not found.")
+
+        # Check Idempotency-Key
+        key = request.headers.get("Idempotency-Key") or request.META.get("HTTP_IDEMPOTENCY_KEY")
+        if key:
+            key = key.strip()
+            if key:
+                existing = Announcement.objects.filter(
+                    local_id=local_id,
+                    idempotency_key=key,
+                ).first()
+                if existing:
+                    warnings = deterministic_fact_check(
+                        existing.ai_note or "",
+                        {
+                            "title": existing.title,
+                            "body": existing.body,
+                            "push_preview": existing.push_preview,
+                            "warnings": [],
+                        },
+                    )
+                    return Response(
+                        {
+                            "announcement": AnnouncementDetailSerializer(existing).data,
+                            "warnings": warnings,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+        note = request.data.get("note")
+        if not note or not isinstance(note, str) or not note.strip():
+            return Response(
+                {"error": "note must be a non-empty string."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        note = note.strip()
+        if len(note) > 2000:
+            return Response(
+                {"error": f"note exceeds 2,000 character limit ({len(note)} chars)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        audience_classifications = request.data.get("audience_classifications", [])
+        if not isinstance(audience_classifications, list):
+            audience_classifications = []
+
+        try:
+            draft_data, model_name = draft_callout(
+                note=note,
+                audience_classifications=audience_classifications,
+                user_id=str(request.user.id),
+                local_id=str(local_id),
+            )
+        except AIConfigError:
+            return Response(
+                {"error": "ai_not_configured"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except AIUnavailableError:
+            return Response(
+                {"error": "ai_unavailable", "message": "Write the callout by hand or try again shortly."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except AIInvalidOutputError:
+            return Response(
+                {"error": "ai_invalid_output"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except ValueError as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        member = request.user.member
+        try:
+            with transaction.atomic():
+                ann = Announcement.objects.create(
+                    local_id=local_id,
+                    created_by=member,
+                    title=draft_data["title"],
+                    body=draft_data["body"],
+                    push_preview=draft_data["push_preview"],
+                    source=Announcement.Source.AI,
+                    status=Announcement.Status.DRAFT,
+                    approved_at=None,
+                    approved_by=None,
+                    ai_note=note,
+                    ai_model=model_name,
+                    audience_classifications=audience_classifications,
+                    idempotency_key=key if key else "",
+                )
+        except IntegrityError:
+            if key:
+                existing = Announcement.objects.filter(
+                    local_id=local_id,
+                    idempotency_key=key,
+                ).first()
+                if existing:
+                    return Response(
+                        {
+                            "announcement": AnnouncementDetailSerializer(existing).data,
+                            "warnings": draft_data["warnings"],
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+            raise
+
+        return Response(
+            {
+                "announcement": AnnouncementDetailSerializer(ann).data,
+                "warnings": draft_data["warnings"],
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AnnouncementStatsView(LocalScopedMixin, APIView):

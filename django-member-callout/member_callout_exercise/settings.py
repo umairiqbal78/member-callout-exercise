@@ -88,6 +88,17 @@ STATIC_URL = "static/"
 # Default primary key field type
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# AI Drafting configuration
+AI_PROVIDER = config("AI_PROVIDER", default="fake")
+GEMINI_API_KEY = config("GEMINI_API_KEY", default="")
+GEMINI_MODEL = config("GEMINI_MODEL", default="gemini-2.5-flash")
+AI_TIMEOUT_SECONDS = config("AI_TIMEOUT_SECONDS", default=8.0, cast=float)
+AI_TOTAL_BUDGET_SECONDS = config("AI_TOTAL_BUDGET_SECONDS", default=10.0, cast=float)
+AI_BREAKER_FAILURES = config("AI_BREAKER_FAILURES", default=5, cast=int)
+AI_BREAKER_WINDOW_SECONDS = config("AI_BREAKER_WINDOW_SECONDS", default=60, cast=int)
+AI_BREAKER_COOLDOWN_SECONDS = config("AI_BREAKER_COOLDOWN_SECONDS", default=60, cast=int)
+AI_THROTTLE = config("AI_THROTTLE", default="10/min")
+
 # Django REST Framework
 REST_FRAMEWORK = {
     # Rule 1: every endpoint is closed by default; views must declare permissions explicitly.
@@ -97,6 +108,9 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.CursorPagination",
     "PAGE_SIZE": 50,
+    "DEFAULT_THROTTLE_RATES": {
+        "ai_draft": AI_THROTTLE,
+    },
 }
 
 # Redis cache (wired up for Rule 2 / send-path in later sessions)

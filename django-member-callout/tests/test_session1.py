@@ -12,6 +12,7 @@ Covers:
 """
 
 import json
+import os
 import re
 import uuid
 
@@ -420,7 +421,21 @@ class TestReadmeSanity:
     )
 
     def _load_readme_json(self) -> dict:
-        with open(self.README_PATH) as f:
+        candidates = [
+            self.README_PATH,
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "README.md")),
+            "/app/README.md",
+            os.path.abspath("README.md"),
+        ]
+        readme_path = None
+        for p in candidates:
+            if os.path.exists(p):
+                readme_path = p
+                break
+        if not readme_path:
+            raise FileNotFoundError(f"Could not find README.md in candidates: {candidates}")
+
+        with open(readme_path) as f:
             content = f.read()
         # Find the first fenced JSON block under ## TEST ACCOUNTS
         match = re.search(

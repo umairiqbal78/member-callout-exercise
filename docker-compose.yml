@@ -61,6 +61,8 @@ services:
     environment:
       DB_HOST: db
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./README.md:/app/README.md:ro
     ports:
       - "8000:8000"
     depends_on:

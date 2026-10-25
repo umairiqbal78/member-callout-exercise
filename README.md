@@ -124,6 +124,28 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "source": "manual"
     }
   },
+  "ai_draft_example": {
+    "method": "POST",
+    "path": "/api/announcements/ai-draft/",
+    "headers": {
+      "Authorization": "Token <token>",
+      "Idempotency-Key": "sample-ai-draft-key-1",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "local_id": "2a004577-dd0d-56f6-b5a1-59dad9c37f66",
+      "note": "emergency mtg thurs 6pm hall re: contractor pulling crews off the westside job, EVERYONE needs to be there this is the third time"
+    },
+    "notes": "AI_PROVIDER=fake works without a key. With GEMINI_API_KEY set, live Gemini is called."
+  },
+  "approve_example": {
+    "method": "POST",
+    "path": "/api/announcements/{id}/approve/",
+    "headers": {
+      "Authorization": "Token <token>"
+    },
+    "notes": "Approves a draft announcement. Required before an AI-sourced announcement can be sent."
+  },
   "endpoints": [
     {
       "method": "POST",
@@ -153,6 +175,14 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "notes": "Creates a draft announcement scoped to caller's local. Retries with same key return 200 with the existing announcement."
     },
     {
+      "method": "POST",
+      "path": "/api/announcements/ai-draft/",
+      "auth": "Authorization: Token <token>",
+      "headers": "Idempotency-Key: <unique-key> (optional)",
+      "roles": "leader of that local only — 404 if wrong local, 403 for member",
+      "notes": "Generates AI draft with title (<=100), body (<=2000), push_preview (<=120), and warnings. AI_PROVIDER=fake works without a key."
+    },
+    {
       "method": "GET",
       "path": "/api/announcements/{id}/",
       "auth": "Authorization: Token <token>",
@@ -163,6 +193,13 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "path": "/api/announcements/{id}/",
       "auth": "Authorization: Token <token>",
       "roles": "leader only — only while status=draft; text edits clear approved_at"
+    },
+    {
+      "method": "POST",
+      "path": "/api/announcements/{id}/approve/",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader of that local only — 404 if wrong local, 403 for member",
+      "notes": "One UPDATE setting approved_by and approved_at. Required before sending AI draft."
     },
     {
       "method": "POST",

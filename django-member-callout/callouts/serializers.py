@@ -115,6 +115,8 @@ class AnnouncementDetailSerializer(serializers.ModelSerializer):
             "recipient_count",
             "final_counts",
             "sent_at",
+            "ai_note",
+            "ai_model",
             "created_at",
         ]
         read_only_fields = [
@@ -126,14 +128,17 @@ class AnnouncementDetailSerializer(serializers.ModelSerializer):
             "recipient_count",
             "final_counts",
             "sent_at",
+            "ai_note",
+            "ai_model",
             "created_at",
         ]
 
     def update(self, instance, validated_data):
-        # Any text edit (title/body/push_preview) clears approved_at.
+        # Any text edit (title/body/push_preview) clears approved_at and approved_by.
         text_fields = {"title", "body", "push_preview"}
         if text_fields & set(validated_data.keys()):
             validated_data["approved_at"] = None
+            validated_data["approved_by"] = None
         return super().update(instance, validated_data)
 
 

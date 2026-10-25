@@ -49,6 +49,13 @@ def fan_out_task(announcement_id):
         )
         return
 
+    if ann.source == Announcement.Source.AI and ann.approved_at is None:
+        logger.error(
+            "fan_out: announcement %s is AI-sourced without approval, refusing",
+            announcement_id,
+        )
+        return
+
     # Build member queryset — optionally narrowed by audience_classifications
     member_qs = Member.objects.filter(
         local_id=ann.local_id,
@@ -370,6 +377,21 @@ def invariant_check():
                 f"stats nesting violation for announcement {row[0]}: "
                 f"targeted={row[1]}, delivered={row[2]}, read={row[3]}, "
                 f"acknowledged={row[4]}, coming={row[5]}, cant_make_it={row[6]}, no_response={row[7]}"
+            )
+
+    # 6. unapproved AI announcements in non-draft status
+    with connection.cursor() as cursor:
+        cursor.execute("""
+            SELECT id, status, source, approved_at
+              FROM announcements
+             WHERE source = 'ai'
+               AND status != 'draft'
+               AND approved_at IS NULL
+             LIMIT 10
+        """)
+        for row in cursor.fetchall():
+            errors.append(
+                f"unapproved AI announcement {row[0]} has non-draft status '{row[1]}'"
             )
 
     if errors:

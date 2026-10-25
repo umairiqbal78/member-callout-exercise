@@ -182,6 +182,10 @@ class Announcement(models.Model):
     recipient_count = models.IntegerField(default=0)
     final_counts = models.JSONField(null=True, blank=True)  # jsonb, frozen when closed
     sent_at = models.DateTimeField(null=True, blank=True)
+    # ai_note: original messy note pasted by leader
+    ai_note = models.TextField(null=True, blank=True)
+    # ai_model: provider/model identifier used to draft (e.g. gemini-2.5-flash or fake)
+    ai_model = models.CharField(max_length=100, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # idempotency_key: unique per (local_id, key) — a retry finds the same row
     idempotency_key = models.CharField(max_length=255, blank=True)
@@ -193,7 +197,11 @@ class Announcement(models.Model):
                 fields=["local_id", "idempotency_key"],
                 condition=models.Q(idempotency_key__gt=""),
                 name="announcements_local_idempotency_uniq",
-            )
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(source="ai") | models.Q(status="draft") | models.Q(approved_at__isnull=False),
+                name="announcements_ai_approval_check",
+            ),
         ]
 
     def __str__(self) -> str:
