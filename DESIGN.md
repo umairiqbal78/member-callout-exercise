@@ -137,3 +137,5 @@ Each protection is enforced in the database and API state machine:
 ### 4. A diagram
 
 https://excalidraw.com/#json=7s7_jjpXnhNHY8bbtLWJU,mKW6jbi5ZnI-xyrAmndCHQ
+
+![Architecture Diagram](Architecture-Diagram.png)
