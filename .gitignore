@@ -1,1 +1,15 @@
+.env
+.venv/
+*.sqlite3
+db.sqlite3
 /django-member-callout/.venv
+/django-member-callout/db.sqlite3
+/django-member-callout/.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.pytest_cache/
+*.egg-info/
+dist/
+.eggs/

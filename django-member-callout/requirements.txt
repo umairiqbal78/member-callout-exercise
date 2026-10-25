@@ -1,0 +1,7 @@
+Django==6.1.2
+djangorestframework==3.18.3
+psycopg[binary]==3.2.10
+python-decouple==3.8
+django-filter==25.1
+pytest==8.3.5
+pytest-django==4.10.0

@@ -1,0 +1,71 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: crewlink
+      POSTGRES_USER: crewlink
+      POSTGRES_PASSWORD: crewlink
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crewlink -d crewlink"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: ./django-member-callout
+    env_file:
+      - ./django-member-callout/.env
+    environment:
+      DB_HOST: db
+    depends_on:
+      db:
+        condition: service_healthy
+    command: python manage.py migrate --noinput
+    restart: "no"
+
+  seed:
+    build:
+      context: ./django-member-callout
+    env_file:
+      - ./django-member-callout/.env
+    environment:
+      DB_HOST: db
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python manage.py seed_demo
+    restart: "no"
+
+  api:
+    build:
+      context: ./django-member-callout
+    env_file:
+      - ./django-member-callout/.env
+    environment:
+      DB_HOST: db
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:

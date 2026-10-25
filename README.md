@@ -1,2 +1,174 @@
 # member-callout-exercise
 CrewLink is a fictional platform for labour unions, invented for this exercise. Union members are working people: electricians, transit operators, sheet-metal workers. Union leadership uses the platform to reach them.
+
+---
+
+## About CrewLink
+
+CrewLink solves the "we missed people on the callout" problem. When a leader sends a callout, every active member of their local gets it in the app and it waits there until their phone has signal. Leaders see who received it, read it, and replied *Coming* or *Can't make it*. Nobody outside a local can see that local's data.
+
+Session 1 delivers: the data model, PostgreSQL, DRF auth, all Rule 1 permission enforcement, and the full set of member/leader endpoints.
+
+---
+
+## Running
+
+### Option 1 — Docker Compose (reviewer path)
+
+```bash
+git clone <repo>
+cd member-callout-exercise
+docker compose up
+```
+
+That's it. The compose file runs `migrate` then `seed_demo` then starts `api` on port 8000. Wait for the log line `seed_demo complete.` before hitting the API.
+
+### Option 2 — Local venv (development path)
+
+```bash
+# 1. Start only db and redis in Docker
+docker compose up db redis
+
+# 2. Copy the env file and adjust DB_HOST to localhost
+cp django-member-callout/.env.example django-member-callout/.env
+# Edit .env: set DB_HOST=localhost
+
+# 3. Activate the venv and install deps
+cd django-member-callout
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 4. Migrate and seed
+python manage.py migrate
+python manage.py seed_demo
+
+# 5. Run the dev server
+python manage.py runserver
+```
+
+### Running tests
+
+**In Docker (CI path):**
+```bash
+docker compose run --rm api pytest
+```
+
+**Local venv:**
+```bash
+cd django-member-callout
+source .venv/bin/activate
+pytest
+```
+
+Tests require the database to be seeded (`seed_demo` must have been run first). The test suite does **not** re-run seed_demo — it reads data the seed already created.
+
+---
+
+## TEST ACCOUNTS
+
+> ⚠️ **DEMO CREDENTIALS ONLY — never use in production.**
+
+```json
+{
+  "base_url": "http://localhost:8000",
+  "auth": {
+    "login_method": "POST",
+    "login_path": "/api/auth/login/",
+    "login_body": {"username": "<username>", "password": "<password>"},
+    "token_usage": "Authorization: Token <token>"
+  },
+  "locals": [
+    {
+      "name": "Local 27",
+      "id": "2a004577-dd0d-56f6-b5a1-59dad9c37f66",
+      "leader": {
+        "username": "leader_local27",
+        "password": "Demo1234!",
+        "member_id": "add59109-72d9-5ad6-b96a-14ebb1e434a5"
+      },
+      "member": {
+        "username": "member_local27",
+        "password": "Demo1234!",
+        "member_id": "20ba580d-34cb-5a1c-9f9e-d771f6c10222"
+      }
+    },
+    {
+      "name": "Local 104",
+      "id": "aaf64bfb-be56-54c6-9066-2061c7ecbbbd",
+      "leader": {
+        "username": "leader_local104",
+        "password": "Demo1234!",
+        "member_id": "f059cc9d-2b36-5647-b7fd-8896eb8d01eb"
+      },
+      "member": {
+        "username": "member_local104",
+        "password": "Demo1234!",
+        "member_id": "e4c9f755-5e08-58e4-b214-a1dacb7118ef"
+      }
+    }
+  ],
+  "announcement_local27_id": "81c7d323-2c24-5fea-93d1-faffc3a9e9b8",
+  "member_local104_id": "e4c9f755-5e08-58e4-b214-a1dacb7118ef",
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/auth/login/",
+      "auth": "none",
+      "roles": "anyone",
+      "notes": "Returns {token, member_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/me/",
+      "auth": "Authorization: Token <token>",
+      "roles": "any authenticated member"
+    },
+    {
+      "method": "GET",
+      "path": "/api/announcements/",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader only"
+    },
+    {
+      "method": "POST",
+      "path": "/api/announcements/",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader only",
+      "notes": "Creates a draft announcement scoped to the caller's local"
+    },
+    {
+      "method": "GET",
+      "path": "/api/announcements/{id}/",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader only — 404 if id belongs to another local"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/announcements/{id}/",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader only — only while status=draft; text edits clear approved_at"
+    },
+    {
+      "method": "GET",
+      "path": "/api/me/inbox/",
+      "auth": "Authorization: Token <token>",
+      "roles": "any authenticated member — returns own rows only",
+      "notes": "Cursor paginated; supports ?since=<ISO-8601>"
+    },
+    {
+      "method": "POST",
+      "path": "/api/me/receipts/",
+      "auth": "Authorization: Token <token>",
+      "roles": "any authenticated member — only touches own rows",
+      "notes": "Body: {announcement_ids: [...], delivered: bool, read: bool}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/me/announcements/{id}/respond/",
+      "auth": "Authorization: Token <token>",
+      "roles": "any authenticated member — only touches own row",
+      "notes": "Body: {response: 'coming' | 'cant_make_it'}"
+    }
+  ]
+}
+```

@@ -73,6 +73,11 @@ announcements
   id, local_id, created_by, title, body, needs_ack
   starts_at                -- meeting time, null for plain announcements
   status                   -- draft | sending | sent | closed
+  source                   -- manual | ai
+  audience_classifications -- text array (e.g. ['Journeyman Wireman', 'Foreman'])
+  push_preview             -- short preview text, max 120 chars
+  approved_by              -- member_id (nullable), leader who approved
+  approved_at              -- timestamp (nullable), cleared on any draft text edit
   recipient_count, final_counts (jsonb), sent_at, created_at
   idempotency_key          -- unique per (local_id, key)
 
@@ -90,7 +95,7 @@ announcement_recipients    -- one row per announcement per member
 * **What each member did:** Each action has its own timestamp, empty until it happens and set only once (`COALESCE`), so a late or repeated event from an offline phone can’t undo anything. Delivered means the app confirmed it stored the callout. A reply also sets read and acknowledged. I rejected a single status column, because read and coming aren’t one ladder and an offline phone can report events out of order. I also rejected an event log alone, because every dashboard count would have to replay events.
 * **Counts:** The dashboard runs one grouped count with `FILTER` over a single callout’s rows, about 22,400 at most, and caches the result for around 10 seconds so four viewers cost one query. I rejected counters on the announcement row, because thousands of members updating one row would queue behind each other.
 * **Leadership:** Leaders are granted a row in `leadership_roles` tied to one local. I rejected a role column on `members`, because any member-facing serializer that exposes it is one mistake from letting someone promote themselves. With a separate table, no member endpoint touches it.
-* **Changes to the given tables:** `announcements` gets `starts_at` to decide what counts as missed, `status` because `sent_at` can’t tell “still sending” from “crashed halfway”, `created_by` for audit, and `idempotency_key` so a retried send finds the same announcement. Recipients carry `local_id`, with foreign keys to both parents that include it, so the database refuses a recipient from another local. `push_sent_at` lets a restarted worker skip members already pushed. Tokens live in `member_devices` so dead ones can be disabled.
+* **Changes to the given tables:** `announcements` adds `status`, `starts_at`, `created_by`, and `idempotency_key` for delivery tracking and deduplication, plus `audience_classifications` (Postgres array), `push_preview` (max 120 chars), `source`, and review governance (`approved_by`, `approved_at`, cleared on draft text edits). Recipients carry `local_id` with composite foreign keys to both parents (`announcements`, `members`) to prevent cross-local rows at the database level, and use `fillfactor 80` to keep frequent in-place timestamp updates cheap. `push_sent_at` lets a restarted worker skip members already pushed. Tokens live in `member_devices` so dead ones can be disabled, and `members.user_id` is nullable so members without logins can receive callouts.
 * **Scale:** 187,000 members × 100 callouts a year is about 18.7 million recipient rows, only a few GB, so size isn’t the risk. The risks are update churn, cold data and bursts. Updated columns are left unindexed and the table has a lower `fillfactor`, so updates stay cheap. When a callout passes its meeting time, a scheduled job saves its final counts into `final_counts` and sets the status to closed. Recipient rows are deleted after 12 months (an assumption to confirm with the client), keeping the table near 19 million rows. Fan-out inserts run in chunks in the background, and receipts arrive in batches.
 
 ### 2. The Send Path
@@ -114,15 +119,16 @@ The stats endpoint reads from a Redis cache with a 10-second lifetime. On a miss
 ### 3. The Two Rules, by Design
 
 **Rule 1: Nobody sees or does more than they should.**
-* **Between locals:** The server finds your local from your login, never from the request. Every query is filtered to that local, so another local’s id just returns “not found”. The database adds a second lock: a recipient row can’t be linked to a member from a different local.
-* **Member versus leader:** Leaders are rows in a separate `leadership_roles` table, checked on every request. Members can only read and update their own row, and no member endpoint can touch roles.
-* **A forgotten endpoint next year:** New endpoints are closed by default, and they inherit the local filter from one shared base class. A test in CI fails the build if any endpoint has no explicit permission, and tries every endpoint as a user from another local, expecting “not found”.
+* **Between locals:** The server finds your local from your authenticated member record, never from the request. Every query is filtered to that local via `LocalScopedMixin`, so another local’s id returns 404 (Not Found), never 403, preventing existence leaks. The database adds a second lock: composite foreign keys `(announcement_id, local_id)` and `(member_id, local_id)` on `announcement_recipients` ensure cross-local rows are rejected at the DB engine level.
+* **Member versus leader:** Leaders are tracked in a separate `leadership_roles` table and verified on every privileged request (`IsLeaderOfLocal`). Members only read and update their own rows via `/api/me/inbox/`, `/api/me/receipts/`, and `/api/me/announcements/{id}/respond/`. No member endpoint or serializer can expose or mutate roles or `local_id`.
+* **A forgotten endpoint next year:** DRF's `DEFAULT_PERMISSION_CLASSES` is set to `DenyAll`, closing all endpoints by default. Every view must declare explicit permission classes. A CI test inspects the URL resolver and fails the build if any API view lacks explicit permissions or if an authenticated user from another local can access another local's resources.
 
 **Rule 2: Nobody gets it twice.** 
-Each protection is in the database:
-* **Retried Send:** Only the first press changes the status from draft to sending. A retry changes nothing.
-* **Restart while creating rows:** One row per member per callout is enforced by a unique constraint, so a rerun can’t add a second.
-* **Restart while pushing:** A worker marks a member as pushed before sending, so a rerun skips them. In the rare crash, someone misses one nudge but still has the callout in the app.
+Each protection is enforced in the database and API state machine:
+* **Draft Editing & Immutability:** Callouts can only be edited via PATCH while in `draft` status; once sending or sent, changes are rejected. Any edit to title, body, or push preview automatically clears `approved_at`, preventing stale approvals.
+* **Retried Send:** Only the first press changes the status from draft to sending via an atomic compare-and-set. A retry changes nothing, and `idempotency_key` unique per `(local_id, key)` prevents duplicate creation.
+* **Restart while creating rows:** One row per member per callout is enforced by a unique constraint on `(announcement_id, member_id)` with `ON CONFLICT DO NOTHING`.
+* **Restart while pushing:** A worker marks a member as pushed before sending (`push_sent_at`), so a rerun skips them. In the rare crash, someone misses one nudge but still has the callout in the app.
 
 ### Precautions for Production
 * **Rule 2 Alert:** Alert if pushes sent ever exceed the number of recipients.
