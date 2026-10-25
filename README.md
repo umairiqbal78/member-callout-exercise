@@ -13,7 +13,7 @@ Session 1 delivers: the data model, PostgreSQL, DRF auth, all Rule 1 permission 
 
 ## Running
 
-### Option 1 — Docker Compose (reviewer path)
+### Option 1 — Docker Compose
 
 ```bash
 git clone <repo>
@@ -23,7 +23,7 @@ docker compose up
 
 That's it. The compose file runs `migrate` then `seed_demo` then starts `api` on port 8000. Wait for the log line `seed_demo complete.` before hitting the API.
 
-### Option 2 — Local venv (development path)
+### Option 2 — Local venv
 
 ```bash
 # 1. Start only db and redis in Docker
@@ -65,8 +65,6 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
 ---
 
 ## TEST ACCOUNTS
-
-> ⚠️ **DEMO CREDENTIALS ONLY — never use in production.**
 
 ```json
 {
