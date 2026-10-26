@@ -120,10 +120,11 @@ https://excalidraw.com/#json=7s7_jjpXnhNHY8bbtLWJU,mKW6jbi5ZnI-xyrAmndCHQ
 ## 03 What I didn't build, and what I'd do next
 
 ### What I left out
-Real push delivery is not implemented yet; notifications currently use the push_log stand-in. Before real members use the system, the next priority is integrating FCM and adding retries for failed tokens. The dashboard also does not update live, since its numbers refresh only on a timer or when manually tapped. In addition, the 12-month cleanup of old recipient data has been designed but still requires the client’s approval before it can run.
+The DEVOPS BONUS part.
 
 ### What I’d do next
 For leaders, the next improvements would include a one-tap option to remind only members who have not responded, while ensuring that no member receives the same callout twice. Leaders should also be able to schedule a callout in advance, such as writing it at night and sending it at 7:00 the following morning. The system could show how much notice each callout provided, answering Thursday’s question before the meeting rather than afterward. Reusable templates for meetings, emergencies, and schedule changes would also make callouts faster to prepare.
+
 For members, useful additions would include a one-tap option to add the meeting to their calendar and a local reminder before the meeting for people who confirmed that they are attending.
 
 ---
