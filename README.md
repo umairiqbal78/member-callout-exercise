@@ -316,9 +316,9 @@ flutter test
    docker compose up -d
    docker compose exec api python manage.py seed_demo
    ```
-2. **Leader Workflow (Tab 1):**
+2. **Leader Workflow:**
    - Open Chrome at the Flutter app URL.
-   - Enter `http://localhost:8000`, username `leader_local27`, password `leader_local27pass`.
+   - Enter `http://localhost:8000`, username `leader_local27`, password `Demo1234!`.
    - The **Leader Screen** loads, automatically preselecting **Local 27** and fetching available classifications.
    - In the **Raw Note** field, enter:
      ```text
@@ -329,9 +329,8 @@ flutter test
    - Tap **"Approve"**. A confirmation dialog displays the exact content. Tap **"Confirm"** (status turns green **"Approved"**).
    - Tap **"Send"**. A confirmation dialog opens confirming the audience and local. Tap **"Confirm Send"**.
    - The status updates to `sending` / `sent`, and the live **Delivery Counts Table** appears, polling every 15 seconds.
-3. **Member Workflow (Tab 2):**
-   - Open a second Chrome tab at the Flutter app URL.
-   - Log in as `member_local27` (password `member_local27pass`).
+3. **Member Workflow:**
+   - Log in as `member_local27` (password `Demo1234!`).
    - The **Member Screen** opens, displaying the announcement inbox. Upon loading, the app sends a batch **"delivered"** receipt for new items.
    - Tap the announcement to open the detail view (this automatically sends a **"read"** receipt).
    - Tap **"Got it"** to acknowledge the announcement, or tap **"Coming"** / **"Can't make it"** to RSVP.

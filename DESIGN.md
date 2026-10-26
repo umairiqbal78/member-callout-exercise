@@ -1,12 +1,3 @@
-# Callout System Design
-
-## Problem Statement
-
-**DENISE OKAFOR (Client message):**
-> "Hey, we keep missing people on the callouts. Half of Local 27 didn't know about Thursday's emergency meeting until it was too late and it's caused real problems with the contractor situation. Members are saying they never got anything, or they got it but by the time they saw it the meeting was already over. Also, I need to know before I leave the hall on the day of a callout who's actually coming so I'm not standing in an empty room. Oh and can members outside our local see the wireman apprentices' contact info too? someone mentioned that during onboarding and I want to make sure that's not happening. We need this sorted before the next round of contract talks, whenever that ends up being scheduled."
-
----
-
 ## 01 The Ask
 
 ### Requirements
