@@ -28,17 +28,6 @@ Hi Denise, sorry about Thursday. Here’s what we’ll build. When you send a ca
 3. **When are the contract talks, and what has to be done by then?** 
    * *Assumption:* It’s soon, so reaching members and the headcount of who’s coming come first.
 
-### The Numbers You're Designing For
-* **Members total:** 187,000
-* **Union locals on one platform:** 43
-* **Largest local (one callout goes to all of them):** 22,400
-* **Push notifications that silently fail roughly:** 5–10%
-* **How long a member can be offline:** hours, sometimes days
-
-### Core Rules
-* **Rule 1:** Nobody sees or touches data outside their own access.
-* **Rule 2:** A retry or a restart must not deliver twice to the same member.
-
 ---
 
 ## 02 Part A: The Design
@@ -121,38 +110,20 @@ Each protection is enforced in the database and API state machine:
 * **Restart while creating rows:** One row per member per callout is enforced by a unique constraint on `(announcement_id, member_id)` with `ON CONFLICT DO NOTHING`.
 * **Restart while pushing:** A worker marks a member as pushed before sending (`push_sent_at`), so a rerun skips them. In the rare crash, someone misses one nudge but still has the callout in the app.
 
-### Dev Stand-ins & Funnel Rule
-
-* **Dev Stand-ins:** `push_log` is a development stand-in for FCM, kept append-only with a plain index and no uniqueness constraint so duplicate pushes would show up honestly in tests and invariant checks. It is not part of the production data model, where provider-side delivery metrics serve that role.
-* **Funnel Rule:** Recipient states strictly advance in order: `read_at` implies `delivered_at`; `acknowledged_at` implies `read_at`; `response` implies `acknowledged_at` and `responded_at`; and `delivered_at <= read_at <= acknowledged_at`. Earlier steps are automatically backfilled via `COALESCE` in shared service functions.
-* **Stats Nesting:** Aggregated metrics must strictly satisfy: `targeted >= delivered >= read >= acknowledged >= coming + cant_make_it`, and `no_response = targeted - coming - cant_make_it`.
-
-### Precautions for Production
-* **Rule 2 Alert:** Alert if pushes sent ever exceed the number of recipients.
-* **Rule 1 Alert:** A test account in one local tries to read another local’s callout every few minutes and alerts on any success, and a nightly check looks for rows where the locals don’t match.
-
-### 4. AI Drafting & Human Approval Gate
-
-#### Why a Synchronous Call with a Hard Budget Was Chosen Over a Background Job
-* **Interactive Leader UX:** A leader drafting a callout from raw notes expects near-instantaneous feedback. Running drafting synchronously with a hard 10-second budget avoids client polling, WebSocket overhead, or delayed UI state synchronization.
-* **Worker Queue Isolation:** Decouples delivery infrastructure from external AI provider performance. If Gemini experiences delays or outages, Celery workers remain dedicated to member delivery (fan-out and push dispatch) without worker exhaustion.
-* **Failing Fast & Predictably:** If the provider is unavailable or exceeds its budget, the system fails fast with `503 ai_unavailable` in $\le 10$ seconds, allowing the leader to write the announcement manually rather than waiting on an uncertain background task.
-
-#### Failure Handling & Resilience
-* **Hard Total Budget:** `AI_TOTAL_BUDGET_SECONDS` (10s) bounds the complete provider interaction, including retries.
-* **Transient Fault Retries:** Exactly one retry is allowed, restricted to connection errors, read timeouts, or 5xx responses with 300ms jittered backoff, provided sufficient budget remains. 4xx errors and 429 rate limits fail immediately without retry.
-* **Shared Redis Circuit Breaker:** After `AI_BREAKER_FAILURES` (5) within `AI_BREAKER_WINDOW_SECONDS` (60s), calls fail immediately with 503 without hitting Google. Following `AI_BREAKER_COOLDOWN_SECONDS` (60s), `cache.add` acts as an atomic lock allowing exactly one probe request to verify provider recovery.
-* **Output Validation & Fact Check:** Generated drafts must have `title <= 100`, `body <= 2000`, and `push_preview <= 120`. Rejections trigger `502 ai_invalid_output` without silent truncation and do not penalize the circuit breaker. Deterministic fact checking flags any numbers, times, or weekdays in the output missing from the raw note.
-* **Zero Secret Leakage:** The Gemini API key is passed strictly via the `x-goog-api-key` header and is never logged, serialized, or exposed to clients. Notes and generated drafts are excluded from logs.
-
-#### The Human Approval Gate
-* **Database CHECK Constraint:** Enforced directly in PostgreSQL: `source <> 'ai' OR status = 'draft' OR approved_at IS NOT NULL`. An AI draft cannot be updated to `sending`, `sent`, or `closed` by ORM or raw SQL without approval.
-* **Atomic Compare-and-Set on Send:** The send query embeds the approval condition: `UPDATE announcements SET status='sending', sent_at=now() WHERE id=%s AND status='draft' AND (source <> 'ai' OR approved_at IS NOT NULL)`. If zero rows are updated for an unapproved AI draft, the view returns `409 {"error": "approval_required"}`.
-* **Auto-Invalidation on Edits:** Any PATCH modifying `title`, `body`, or `push_preview` sets `approved_at = NULL` and `approved_by = NULL`, requiring fresh review.
-* **Refusal in Fan-Out & Invariants:** Background `fan_out_task` refuses unapproved AI callouts, and the periodic `invariant_check` verifies zero non-draft unapproved AI records.
-
-### 5. A diagram
+### 4. A diagram
 
 https://excalidraw.com/#json=7s7_jjpXnhNHY8bbtLWJU,mKW6jbi5ZnI-xyrAmndCHQ
 
 ![Architecture Diagram](Architecture-Diagram.png)
+
+
+## 03 What I didn't build, and what I'd do next
+
+### What I left out
+Real push delivery is not implemented yet; notifications currently use the push_log stand-in. Before real members use the system, the next priority is integrating FCM and adding retries for failed tokens. The dashboard also does not update live, since its numbers refresh only on a timer or when manually tapped. In addition, the 12-month cleanup of old recipient data has been designed but still requires the client’s approval before it can run.
+
+### What I’d do next
+For leaders, the next improvements would include a one-tap option to remind only members who have not responded, while ensuring that no member receives the same callout twice. Leaders should also be able to schedule a callout in advance, such as writing it at night and sending it at 7:00 the following morning. The system could show how much notice each callout provided, answering Thursday’s question before the meeting rather than afterward. Reusable templates for meetings, emergencies, and schedule changes would also make callouts faster to prepare.
+For members, useful additions would include a one-tap option to add the meeting to their calendar and a local reminder before the meeting for people who confirmed that they are attending.
+
+---
