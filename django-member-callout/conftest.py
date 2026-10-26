@@ -25,3 +25,9 @@ def ensure_seed_data(db):
     if not Local.objects.filter(id=LOCAL_27_ID).exists():
         call_command("seed_demo")
 
+
+@pytest.fixture(autouse=True)
+def default_fake_ai(settings):
+    """Ensure tests run against fake AI provider by default."""
+    settings.AI_PROVIDER = "fake"
+
