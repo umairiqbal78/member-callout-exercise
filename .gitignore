@@ -5,6 +5,7 @@ db.sqlite3
 /django-member-callout/.venv
 /django-member-callout/db.sqlite3
 /django-member-callout/.env
+/django-member-callout/celerybeat*
 __pycache__/
 *.pyc
 *.pyo

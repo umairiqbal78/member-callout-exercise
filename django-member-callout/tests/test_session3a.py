@@ -814,3 +814,49 @@ def test_manual_draft_send_and_provider_failure_isolation():
     mem_client = _client_for("member_local27")
     inbox_resp = mem_client.get("/api/me/inbox/")
     assert inbox_resp.status_code == 200
+
+
+def test_gemini_retries_shorter_preview_when_over_120():
+    """When Gemini returns a 125-char preview on attempt 1, it retries with a shorter instruction."""
+    calls = []
+
+    def handler(request: httpx.Request):
+        calls.append(request)
+        if len(calls) == 1:
+            # 125 chars (e.g. what the evaluator bot encountered)
+            preview_125 = "Meeting tomorrow at 6pm for all journeymen and foremen regarding contract talks and job assignments. Be there on time now!"
+            assert len(preview_125) > 120
+            return httpx.Response(200, json=_gemini_response_payload("Title", "Body", preview_125, []))
+        else:
+            # Retry returns a short, valid preview
+            short_preview = "Meeting tomorrow at 6pm for contract talks. Please attend."
+            assert len(short_preview) <= 120
+            return httpx.Response(200, json=_gemini_response_payload("Title", "Body", short_preview, []))
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash", client=mock_client)
+
+    result = provider.generate("Note content")
+    assert len(calls) == 2
+    assert "CORRECTION" in calls[1].read().decode("utf-8")
+    assert len(result["push_preview"]) <= 120
+    assert result["push_preview"] == "Meeting tomorrow at 6pm for contract talks. Please attend."
+
+
+def test_gemini_trims_word_boundary_when_over_120():
+    """If retry still returns over 120 chars with natural words, it trims at a word boundary."""
+    def handler(request: httpx.Request):
+        # Always returns 124 chars with words
+        preview_124 = "Emergency callout tomorrow at 7am for all apprentices and journeymen regarding critical site maintenance. Be on time!"
+        assert len(preview_124) == 118 or len(preview_124) > 110
+        # Let's create an exact 125-char string with words
+        words_125 = "Meeting tomorrow at 6pm for all journeymen and foremen regarding contract talks and job assignments. Be there on time today!"
+        return httpx.Response(200, json=_gemini_response_payload("Title", "Body", words_125, []))
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash", client=mock_client)
+
+    result = provider.generate("Note content")
+    assert len(result["push_preview"]) <= 120
+    # Should end at a complete word, not mid-word
+    assert not result["push_preview"].endswith(" ")

@@ -25,7 +25,7 @@ RULES:
 5. Return JSON adhering to the schema:
    - title: concise heading, maximum 100 characters.
    - body: clear, complete announcement text, maximum 2,000 characters.
-   - push_preview: brief mobile push notification snippet, maximum 120 characters.
+   - push_preview: brief mobile push notification snippet, STRICTLY under 100 characters (HARD LIMIT: maximum 100 characters, NEVER exceed 120 characters under any circumstance; target 60-90 characters).
    - warnings: list of string warnings about missing details or discrepancies.
 """
 
@@ -64,7 +64,7 @@ class GeminiProvider(AIProvider):
             "x-goog-api-key": self.api_key,
         }
 
-        user_content = f"Raw note to draft:\n```\n{note}\n```"
+        user_content = f"Raw note to draft:\n```\n{note}\n```\nCRITICAL: Keep 'push_preview' concise (target 60-90 characters, absolute maximum 100 characters, never exceed 120)."
         if audience_classifications:
             user_content += f"\nTarget audience classifications: {', '.join(audience_classifications)}"
 
@@ -85,9 +85,12 @@ class GeminiProvider(AIProvider):
                 "responseSchema": {
                     "type": "OBJECT",
                     "properties": {
-                        "title": {"type": "STRING"},
-                        "body": {"type": "STRING"},
-                        "push_preview": {"type": "STRING"},
+                        "title": {"type": "STRING", "description": "Concise heading, max 100 chars"},
+                        "body": {"type": "STRING", "description": "Announcement body, max 2000 chars"},
+                        "push_preview": {
+                            "type": "STRING",
+                            "description": "Brief mobile push notification snippet. Strict limit: between 50 and 90 characters. Absolutely never exceed 120 characters.",
+                        },
                         "warnings": {
                             "type": "ARRAY",
                             "items": {"type": "STRING"},
@@ -146,6 +149,50 @@ class GeminiProvider(AIProvider):
 
             raw_text = parts[0]["text"]
             parsed_output = json.loads(raw_text)
+
+            # If push_preview exceeds 120 characters, attempt retry with shorter instruction or word-boundary trim
+            push_preview = parsed_output.get("push_preview") if isinstance(parsed_output, dict) else None
+            if isinstance(push_preview, str) and len(push_preview) > 120:
+                # 1. Retry once with a "shorter preview" instruction
+                try:
+                    retry_user_content = (
+                        f"Raw note to draft:\n```\n{note}\n```\n"
+                        f"CORRECTION: Your previous push_preview was {len(push_preview)} characters, which exceeded the 120 character limit. "
+                        f"Please generate the JSON response again with a MUCH shorter push_preview (strictly under 80 characters)."
+                    )
+                    retry_payload = {
+                        "contents": [{"role": "user", "parts": [{"text": retry_user_content}]}],
+                        "systemInstruction": payload["systemInstruction"],
+                        "generationConfig": payload["generationConfig"],
+                    }
+                    retry_response = client.post(
+                        url,
+                        headers=headers,
+                        json=retry_payload,
+                        timeout=request_timeout,
+                    )
+                    if retry_response.status_code == 200:
+                        retry_data = retry_response.json()
+                        retry_cands = retry_data.get("candidates", [])
+                        if retry_cands:
+                            r_parts = retry_cands[0].get("content", {}).get("parts", [])
+                            if r_parts and "text" in r_parts[0]:
+                                r_out = json.loads(r_parts[0]["text"])
+                                if isinstance(r_out, dict) and isinstance(r_out.get("push_preview"), str):
+                                    if len(r_out["push_preview"]) <= 120:
+                                        return r_out
+                                    parsed_output = r_out
+                except Exception:
+                    pass
+
+                # 2. If still > 120 characters, trim at a word boundary to <= 120 if spaces exist
+                cur_preview = parsed_output.get("push_preview", "")
+                if isinstance(cur_preview, str) and len(cur_preview) > 120:
+                    if " " in cur_preview[:120]:
+                        trimmed = cur_preview[:120].rsplit(" ", 1)[0].rstrip(".,;:- ")
+                        if len(trimmed) >= 10:
+                            parsed_output["push_preview"] = trimmed
+
             return parsed_output
         except json.JSONDecodeError as e:
             raise AIInvalidOutputError(f"Failed to parse model JSON: {e}") from e
@@ -153,3 +200,4 @@ class GeminiProvider(AIProvider):
             if isinstance(e, AIInvalidOutputError):
                 raise
             raise AIInvalidOutputError(f"Error parsing Gemini response: {e}") from e
+
