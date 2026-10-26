@@ -1,122 +1,127 @@
+import 'dart:ui';
 import 'package:flutter/material.dart';
 
+import 'api/api_client.dart';
+import 'screens/leader_screen.dart';
+import 'screens/login_screen.dart';
+import 'screens/member_screen.dart';
+import 'storage/session_storage.dart';
+
 void main() {
-  runApp(const MyApp());
+  runApp(const CrewLinkApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class CrewLinkApp extends StatefulWidget {
+  final ApiClient? client;
 
-  // This widget is the root of your application.
+  const CrewLinkApp({super.key, this.client});
+
+  @override
+  State<CrewLinkApp> createState() => _CrewLinkAppState();
+}
+
+class _CrewLinkAppState extends State<CrewLinkApp> {
+  late final ApiClient _client;
+  final _navKey = GlobalKey<NavigatorState>();
+  bool _isRestoring = true;
+  Widget? _restoredScreen;
+
+  @override
+  void initState() {
+    super.initState();
+    final savedBaseUrl =
+        SessionStorage.instance.getServerUrl() ?? 'http://localhost:8000';
+    _client = widget.client ?? ApiClient(baseUrl: savedBaseUrl);
+
+    _client.onUnauthorized = () {
+      SessionStorage.instance.clearLeaderSession();
+      SessionStorage.instance.clearMemberSession();
+      _navKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => LoginScreen(client: _client)),
+        (route) => false,
+      );
+    };
+
+    _attemptSessionRestore();
+  }
+
+  Future<void> _attemptSessionRestore() async {
+    // 1. Determine target flow
+    final hash = SessionStorage.instance.getUrlHash();
+    String? targetFlow;
+    if (hash.contains('leader')) {
+      targetFlow = 'leader';
+    } else if (hash.contains('member')) {
+      targetFlow = 'member';
+    } else {
+      targetFlow = SessionStorage.instance.getActiveFlow();
+    }
+
+    String? tokenToRestore;
+    if (targetFlow == 'leader') {
+      tokenToRestore = SessionStorage.instance.getLeaderToken();
+    } else if (targetFlow == 'member') {
+      tokenToRestore = SessionStorage.instance.getMemberToken();
+    }
+
+    if (tokenToRestore != null && tokenToRestore.isNotEmpty) {
+      _client.setToken(tokenToRestore);
+      try {
+        final me = await _client.getMe();
+        if (!mounted) return;
+
+        if (targetFlow == 'leader' && me.isLeader) {
+          SessionStorage.instance.setUrlHash('/leader');
+          setState(() {
+            _restoredScreen = LeaderScreen(client: _client, userProfile: me);
+            _isRestoring = false;
+          });
+          return;
+        } else if (targetFlow == 'member') {
+          SessionStorage.instance.setUrlHash('/member');
+          setState(() {
+            _restoredScreen = MemberScreen(client: _client, userProfile: me);
+            _isRestoring = false;
+          });
+          return;
+        }
+      } catch (_) {
+        // Token invalid or expired
+        if (targetFlow == 'leader') {
+          SessionStorage.instance.clearLeaderSession();
+        } else {
+          SessionStorage.instance.clearMemberSession();
+        }
+        _client.setToken(null);
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _restoredScreen = LoginScreen(client: _client);
+        _isRestoring = false;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+      debugShowCheckedModeBanner: false,
+      navigatorKey: _navKey,
+      title: 'CrewLink',
+      scrollBehavior: const MaterialScrollBehavior().copyWith(
+        dragDevices: {
+          PointerDeviceKind.mouse,
+          PointerDeviceKind.touch,
+          PointerDeviceKind.trackpad,
+          PointerDeviceKind.stylus,
+        },
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
-    );
-  }
-}
-
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
-  @override
-  State<MyHomePage> createState() => _MyHomePageState();
-}
-
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
-
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+      theme: ThemeData(useMaterial3: true, primarySwatch: Colors.blue),
+      home: _isRestoring
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          : (_restoredScreen ?? LoginScreen(client: _client)),
     );
   }
 }

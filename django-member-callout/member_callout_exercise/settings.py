@@ -24,11 +24,13 @@ INSTALLED_APPS = [
     "django.contrib.postgres",
     "rest_framework",
     "rest_framework.authtoken",
+    "corsheaders",
     "callouts",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -98,6 +100,18 @@ AI_BREAKER_FAILURES = config("AI_BREAKER_FAILURES", default=5, cast=int)
 AI_BREAKER_WINDOW_SECONDS = config("AI_BREAKER_WINDOW_SECONDS", default=60, cast=int)
 AI_BREAKER_COOLDOWN_SECONDS = config("AI_BREAKER_COOLDOWN_SECONDS", default=60, cast=int)
 AI_THROTTLE = config("AI_THROTTLE", default="10/min")
+
+# CORS configuration
+from corsheaders.defaults import default_headers
+
+CORS_ALLOWED_ORIGIN_REGEXES = config(
+    "CORS_ALLOWED_ORIGIN_REGEXES",
+    default=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    cast=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+)
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "idempotency-key",
+]
 
 # Django REST Framework
 REST_FRAMEWORK = {

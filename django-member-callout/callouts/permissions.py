@@ -62,3 +62,21 @@ class IsLeaderOfLocal(IsAuthenticated):
             local_id=member.local_id,
             revoked_at__isnull=True,
         ).exists()
+
+
+class IsLeaderOfAnyLocal(IsAuthenticated):
+    """
+    The caller must be authenticated, have a Member row, and hold an active
+    leadership_roles row for at least one local.
+    """
+
+    def has_permission(self, request, view):
+        if not super().has_permission(request, view):
+            return False
+        user = request.user
+        if not hasattr(user, "member"):
+            return False
+        return user.member.leadership_roles.filter(
+            revoked_at__isnull=True,
+        ).exists()
+

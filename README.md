@@ -227,7 +227,14 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "path": "/api/me/receipts/",
       "auth": "Authorization: Token <token>",
       "roles": "any authenticated member — only touches own rows",
-      "notes": "Body: {announcement_ids: [...], delivered: bool, read: bool}"
+      "notes": "Body: {announcement_ids: [...], kind: 'delivered' | 'read'}. Backwards compatible with {delivered: bool, read: bool}."
+    },
+    {
+      "method": "POST",
+      "path": "/api/me/announcements/{id}/acknowledge/",
+      "auth": "Authorization: Token <token>",
+      "roles": "any authenticated member — only touches own row",
+      "notes": "Sets acknowledged_at and fills read_at and delivered_at if empty. Returns 409 callout_closed if closed."
     },
     {
       "method": "POST",
@@ -235,6 +242,13 @@ Tests require the database to be seeded (`seed_demo` must have been run first). 
       "auth": "Authorization: Token <token>",
       "roles": "any authenticated member — only touches own row",
       "notes": "Body: {response: 'coming' | 'cant_make_it'}. Returns 409 if announcement is closed."
+    },
+    {
+      "method": "GET",
+      "path": "/api/classifications/?local_id=...",
+      "auth": "Authorization: Token <token>",
+      "roles": "leader of that local only",
+      "notes": "Returns distinct classifications of active members of that local (404 for other locals, 403 for members)."
     }
   ]
 }
@@ -263,3 +277,65 @@ The script:
 - Fires 20 parallel Send requests (verifying exactly 1 returns 202, 19 return 200).
 - Fires 20 parallel Create requests with the same key (verifying all return 200 with the same ID).
 - Verifies recipient count, distinct push_log members, and executes `python manage.py check_invariants`.
+
+---
+
+## FLUTTER APP (`flutter_member_callout`)
+
+The CrewLink Flutter application is located in `flutter_member_callout/`. It provides a clean, responsive interface for both Leaders and Members.
+
+### Prerequisites & Setup
+1. Navigate to the Flutter directory:
+   ```bash
+   cd flutter_member_callout
+   ```
+2. Install dependencies:
+   ```bash
+   flutter pub get
+   ```
+3. Run the application in Chrome:
+   ```bash
+   flutter run -d chrome
+   ```
+
+> [!NOTE]
+> - **Server URL Default:** The app defaults to `http://localhost:8000`.
+> - **Android Emulators:** If running on an Android emulator, change the server URL on the login screen to `http://10.0.2.2:8000` to reach the host machine.
+> - **In-Memory Token:** Authentication tokens are kept in memory only and never written to disk or localStorage.
+
+### Verification & Tests
+Run static analysis and the automated widget test suite:
+```bash
+flutter analyze
+flutter test
+```
+
+### Interactive Demo Script
+1. **Ensure Backend Services are Running:**
+   ```bash
+   docker compose up -d
+   docker compose exec api python manage.py seed_demo
+   ```
+2. **Leader Workflow (Tab 1):**
+   - Open Chrome at the Flutter app URL.
+   - Enter `http://localhost:8000`, username `leader_local27`, password `leader_local27pass`.
+   - The **Leader Screen** loads, automatically preselecting **Local 27** and fetching available classifications.
+   - In the **Raw Note** field, enter:
+     ```text
+     Mandatory safety standdown meeting at Main Rail Yard tomorrow morning at 07:00 AM sharp. Bring hardhat and PPE.
+     ```
+   - Tap **"Draft with AI"**. A spinner appears while the AI processes.
+   - Notice the Title, Body, and Push Preview are filled. The character counter stays green (under 120 chars) and approval status shows **"Not approved"**.
+   - Tap **"Approve"**. A confirmation dialog displays the exact content. Tap **"Confirm"** (status turns green **"Approved"**).
+   - Tap **"Send"**. A confirmation dialog opens confirming the audience and local. Tap **"Confirm Send"**.
+   - The status updates to `sending` / `sent`, and the live **Delivery Counts Table** appears, polling every 15 seconds.
+3. **Member Workflow (Tab 2):**
+   - Open a second Chrome tab at the Flutter app URL.
+   - Log in as `member_local27` (password `member_local27pass`).
+   - The **Member Screen** opens, displaying the announcement inbox. Upon loading, the app sends a batch **"delivered"** receipt for new items.
+   - Tap the announcement to open the detail view (this automatically sends a **"read"** receipt).
+   - Tap **"Got it"** to acknowledge the announcement, or tap **"Coming"** / **"Can't make it"** to RSVP.
+4. **Observe Count Updates:**
+   - Switch back to Tab 1 (Leader view).
+   - Within 15 seconds, the automatic poll (or tapping **Refresh**) updates the counts table to reflect the member's delivery, read, acknowledged, and RSVP statuses.
+

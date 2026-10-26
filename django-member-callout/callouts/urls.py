@@ -1,12 +1,14 @@
 from django.urls import path
 
 from .views import (
+    AcknowledgeView,
     AnnouncementAIDraftView,
     AnnouncementApproveView,
     AnnouncementDetailView,
     AnnouncementListCreateView,
     AnnouncementSendView,
     AnnouncementStatsView,
+    ClassificationsView,
     InboxView,
     LoginView,
     MeView,
@@ -24,11 +26,17 @@ urlpatterns = [
     path("me/inbox/", InboxView.as_view(), name="inbox"),
     path("me/receipts/", ReceiptBatchView.as_view(), name="receipts"),
     path(
+        "me/announcements/<uuid:pk>/acknowledge/",
+        AcknowledgeView.as_view(),
+        name="acknowledge",
+    ),
+    path(
         "me/announcements/<uuid:pk>/respond/",
         RespondView.as_view(),
         name="respond",
     ),
     # Leader
+    path("classifications/", ClassificationsView.as_view(), name="classifications"),
     path("announcements/", AnnouncementListCreateView.as_view(), name="announcement-list"),
     path(
         "announcements/ai-draft/",

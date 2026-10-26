@@ -11,6 +11,7 @@ Rule 1 enforcement:
 """
 
 import time
+import uuid
 
 from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
@@ -32,7 +33,8 @@ from .ai import (
     draft_callout,
 )
 from .models import Announcement, AnnouncementRecipient, LeadershipRole, Member
-from .permissions import IsLeaderOfLocal, IsMember
+from .permissions import IsLeaderOfAnyLocal, IsLeaderOfLocal, IsMember
+
 from .serializers import (
     AnnouncementDetailSerializer,
     AnnouncementListSerializer,
@@ -596,15 +598,65 @@ class ReceiptBatchView(LocalScopedMixin, APIView):
         data = serializer.validated_data
         member = request.user.member
 
+        kind = data.get("kind")
+        if not kind:
+            if data.get("acknowledged"):
+                kind = "acknowledged"
+            elif data.get("read"):
+                kind = "read"
+            elif data.get("delivered") or (data.get("delivered") is None and not data.get("read")):
+                kind = "delivered"
+            else:
+                return Response({"updated": 0})
+
         updated = record_receipts(
             member_id=member.pk,
             local_id=member.local_id,
             announcement_ids=data["announcement_ids"],
-            delivered=data.get("delivered", True),
-            read=data.get("read", False),
-            acknowledged=data.get("acknowledged", False),
+            kind=kind,
         )
         return Response({"updated": updated})
+
+
+class AcknowledgeView(LocalScopedMixin, APIView):
+    """
+    POST /api/me/announcements/{id}/acknowledge/
+
+    Sets acknowledged_at and fills read_at and delivered_at if empty.
+    Idempotent. Own rows only.
+    409 {"error": "callout_closed"} after the announcement is closed.
+    """
+
+    permission_classes = [IsMember]
+
+    def post(self, request, pk):
+        member = request.user.member
+
+        recipient = (
+            AnnouncementRecipient.objects.filter(
+                announcement_id=pk,
+                member_id=member.pk,
+                local_id=member.local_id,
+            )
+            .select_related("announcement")
+            .first()
+        )
+        if not recipient:
+            raise NotFound("Recipient row not found.")
+
+        if recipient.announcement.status == Announcement.Status.CLOSED:
+            return Response(
+                {"error": "callout_closed"},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        record_receipts(
+            member_id=member.pk,
+            local_id=member.local_id,
+            announcement_ids=[pk],
+            kind="acknowledged",
+        )
+        return Response({"detail": "Acknowledged."})
 
 
 class RespondView(LocalScopedMixin, APIView):
@@ -649,4 +701,47 @@ class RespondView(LocalScopedMixin, APIView):
             response_value=response_value,
         )
         return Response({"detail": "Response recorded."})
+
+
+class ClassificationsView(APIView):
+    """
+    GET /api/classifications/?local_id=...
+
+    Returns the distinct classifications of active members of that local.
+    Leader of that local only (404 for other locals, 403 for members).
+    Validate local_id against leadership_roles.
+    """
+
+    permission_classes = [IsLeaderOfAnyLocal]
+
+    def get(self, request):
+        local_id = request.query_params.get("local_id")
+        if not local_id:
+            raise NotFound("Local not found.")
+
+        try:
+            uuid.UUID(str(local_id))
+        except (ValueError, TypeError, AttributeError):
+            raise NotFound("Local not found.")
+
+        member = request.user.member
+
+        has_role = member.leadership_roles.filter(
+            local_id=local_id,
+            revoked_at__isnull=True,
+        ).exists()
+        if not has_role:
+            raise NotFound("Local not found.")
+
+        classifications = list(
+            Member.objects.filter(
+                local_id=local_id,
+                status=Member.Status.ACTIVE,
+            )
+            .values_list("classification", flat=True)
+            .distinct()
+            .order_by("classification")
+        )
+        return Response(classifications)
+
 

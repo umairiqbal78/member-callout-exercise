@@ -19,10 +19,12 @@ class LocalSerializer(serializers.ModelSerializer):
 
 
 class LeadershipRoleSerializer(serializers.ModelSerializer):
+    local_name = serializers.CharField(source="local.name", read_only=True)
+
     class Meta:
         model = LeadershipRole
-        fields = ["id", "local_id", "role", "granted_at"]
-        read_only_fields = ["id", "local_id", "role", "granted_at"]
+        fields = ["id", "local_id", "local_name", "role", "granted_at"]
+        read_only_fields = ["id", "local_id", "local_name", "role", "granted_at"]
 
 
 class MeSerializer(serializers.ModelSerializer):
@@ -76,6 +78,8 @@ class AnnouncementListSerializer(serializers.ModelSerializer):
             "source",
             "audience_classifications",
             "push_preview",
+            "approved_by_id",
+            "approved_at",
             "recipient_count",
             "sent_at",
             "created_at",
@@ -84,6 +88,8 @@ class AnnouncementListSerializer(serializers.ModelSerializer):
             "id",
             "local_id",
             "status",
+            "approved_by_id",
+            "approved_at",
             "recipient_count",
             "sent_at",
             "created_at",
@@ -200,9 +206,16 @@ class ReceiptBatchSerializer(serializers.Serializer):
         min_length=1,
         max_length=500,
     )
-    delivered = serializers.BooleanField(default=True)
-    read = serializers.BooleanField(default=False)
-    acknowledged = serializers.BooleanField(default=False, required=False)
+    kind = serializers.ChoiceField(
+        choices=["delivered", "read"],
+        required=False,
+        default=None,
+    )
+    # Kept for backward compatibility with older callers/tests
+    delivered = serializers.BooleanField(required=False, default=None)
+    read = serializers.BooleanField(required=False, default=None)
+    acknowledged = serializers.BooleanField(required=False, default=None)
+
 
 
 class RespondSerializer(serializers.Serializer):

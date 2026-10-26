@@ -29,9 +29,10 @@ def record_receipts(
     member_id: Optional[UUID] = None,
     local_id: Optional[UUID] = None,
     announcement_ids: Optional[Iterable[UUID]] = None,
-    delivered: bool = True,
-    read: bool = False,
-    acknowledged: bool = False,
+    kind: Optional[str] = None,
+    delivered: Optional[bool] = None,
+    read: Optional[bool] = None,
+    acknowledged: Optional[bool] = None,
     now: Optional[datetime] = None,
     delivered_at: Optional[datetime] = None,
     read_at: Optional[datetime] = None,
@@ -43,22 +44,34 @@ def record_receipts(
 
     Uses COALESCE so timestamps are set only once and repeated/out-of-order
     events never undo or corrupt earlier timestamps.
-    Automatically backfills earlier funnel steps to satisfy the funnel rule.
+    Automatically backfills earlier funnel steps to satisfy the funnel rule:
+    - 'delivered' sets delivered_at only.
+    - 'read' sets read_at, and backfills delivered_at if empty.
+    - 'acknowledged' sets acknowledged_at, and backfills read_at and delivered_at if empty.
+    Never fills later steps.
     """
     ann_ids = list(announcement_ids) if announcement_ids else []
-    if not (delivered or read or acknowledged):
-        return 0
+
+    if kind is None:
+        if acknowledged:
+            kind = "acknowledged"
+        elif read:
+            kind = "read"
+        elif delivered or (delivered is None and not read and not acknowledged):
+            kind = "delivered"
+        else:
+            return 0
 
     if now is None:
         now = timezone.now()
 
     # Determine fallback timestamps maintaining delivered_at <= read_at <= acknowledged_at
     t_ack = acknowledged_at or now
-    t_read = read_at or (t_ack if acknowledged else now)
-    t_del = delivered_at or (t_read if (read or acknowledged) else now)
+    t_read = read_at or (t_ack if kind == "acknowledged" else now)
+    t_del = delivered_at or (t_read if kind in ("read", "acknowledged") else now)
 
     update_kwargs = {}
-    if acknowledged:
+    if kind == "acknowledged":
         update_kwargs["delivered_at"] = Coalesce(
             "delivered_at", Value(t_del, output_field=DateTimeField())
         )
@@ -68,17 +81,19 @@ def record_receipts(
         update_kwargs["acknowledged_at"] = Coalesce(
             "acknowledged_at", Value(t_ack, output_field=DateTimeField())
         )
-    elif read:
+    elif kind == "read":
         update_kwargs["delivered_at"] = Coalesce(
             "delivered_at", Value(t_del, output_field=DateTimeField())
         )
         update_kwargs["read_at"] = Coalesce(
             "read_at", Value(t_read, output_field=DateTimeField())
         )
-    elif delivered:
+    elif kind == "delivered":
         update_kwargs["delivered_at"] = Coalesce(
             "delivered_at", Value(t_del, output_field=DateTimeField())
         )
+    else:
+        raise ValueError(f"Unknown kind: {kind}")
 
     qs = AnnouncementRecipient.objects.all()
     if ann_ids:

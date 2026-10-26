@@ -62,6 +62,8 @@ services:
       DB_HOST: db
       REDIS_URL: redis://redis:6379/0
     volumes:
+      - ./django-member-callout:/app
+      - /app/.venv
       - ./README.md:/app/README.md:ro
     ports:
       - "8000:8000"
@@ -82,6 +84,10 @@ services:
     environment:
       DB_HOST: db
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./django-member-callout:/app
+      - /app/.venv
+      - ./README.md:/app/README.md:ro
     depends_on:
       db:
         condition: service_healthy
@@ -100,6 +106,10 @@ services:
     environment:
       DB_HOST: db
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./django-member-callout:/app
+      - /app/.venv
+      - ./README.md:/app/README.md:ro
     depends_on:
       db:
         condition: service_healthy

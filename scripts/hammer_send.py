@@ -177,7 +177,7 @@ def main():
             # Receipts batch
             receipt_resp = member_client.post(
                 "/api/me/receipts/",
-                json={"announcement_ids": [ann_id], "delivered": True, "read": True},
+                json={"announcement_ids": [ann_id], "kind": "delivered"},
                 headers=mem_headers,
             )
             print(f"Member receipts HTTP response: {receipt_resp.status_code} {receipt_resp.json()}")
